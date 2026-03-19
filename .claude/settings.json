@@ -1,0 +1,16 @@
+{
+  "project": {
+    "name": "exo-teams",
+    "description": "Go CLI for Microsoft Teams internal API - no admin consent needed"
+  },
+  "permissions": {
+    "deny": [
+      "git push --force",
+      "git reset --hard",
+      "npm",
+      "yarn",
+      "pnpm",
+      "pip install"
+    ]
+  }
+}

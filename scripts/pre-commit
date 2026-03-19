@@ -1,0 +1,17 @@
+#!/bin/sh
+# Pre-commit hook: run vet and check formatting before allowing commits.
+
+set -e
+
+echo "running go vet..."
+go vet ./...
+
+echo "checking gofmt..."
+UNFORMATTED=$(gofmt -l . 2>&1)
+if [ -n "$UNFORMATTED" ]; then
+    echo "these files need formatting (run 'make fmt'):"
+    echo "$UNFORMATTED"
+    exit 1
+fi
+
+echo "pre-commit checks passed"
