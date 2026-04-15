@@ -21,8 +21,11 @@ const (
 	// The assignments.onenote.com API accepts tokens scoped to https://assignments.onenote.com/.default
 	// and grants Notes.ReadWrite + Notes.ReadWrite.All, which is enough for read access.
 	assignmentsBaseURL = "https://assignments.onenote.com/api/v1.0/edu"
-	graphBaseURL       = "https://graph.microsoft.com/v1.0"
 )
+
+// graphBaseURL is the Microsoft Graph v1.0 base URL. It is a var (not const) so
+// tests can redirect traffic to an httptest server by temporarily overriding it.
+var graphBaseURL = "https://graph.microsoft.com/v1.0"
 
 // Assignment represents a Teams assignment.
 type Assignment struct {
