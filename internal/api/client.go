@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,13 +35,11 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("loading tokens: %w", err)
 	}
 
-	// Auto-refresh if expired
 	tokens, err = auth.EnsureFresh(tokens)
 	if err != nil {
 		return nil, err
 	}
 
-	// Exchange the root skype token for a derived skypetoken
 	skypeToken, err := auth.ExchangeSkypeToken(tokens.Skype)
 	if err != nil {
 		return nil, fmt.Errorf("exchanging skype token: %w", err)
@@ -62,7 +63,6 @@ func NewClientWithoutExchange() (*Client, error) {
 		return nil, fmt.Errorf("loading tokens: %w", err)
 	}
 
-	// Auto-refresh if expired
 	tokens, err = auth.EnsureFresh(tokens)
 	if err != nil {
 		return nil, err
@@ -104,7 +104,6 @@ func (c *Client) getUserObjectID() (string, error) {
 	}
 
 	payload := parts[1]
-	// Add base64 padding if needed.
 	if m := len(payload) % 4; m != 0 {
 		payload += strings.Repeat("=", 4-m)
 	}
@@ -131,36 +130,141 @@ func (c *Client) getUserObjectID() (string, error) {
 	return claims.OID, nil
 }
 
+// sanitizeURL returns a URL string with any query string and fragment stripped,
+// suitable for logging without leaking tokens or identifiers embedded in query params.
+func sanitizeURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	clean := *u
+	clean.RawQuery = ""
+	clean.Fragment = ""
+	return clean.String()
+}
+
 // doRequest executes an HTTP request and returns the response body.
-func (c *Client) doRequest(req *http.Request) ([]byte, error) {
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("executing request to %s: %w", req.URL.String(), err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response from %s: %w", req.URL.String(), err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("request to %s returned status %d: %s", req.URL.String(), resp.StatusCode, string(body))
-	}
-
-	return body, nil
+// Retries on transient failures, auto-refreshes tokens on 401, and uses ctx for cancellation.
+// Errors never include the response body to avoid leaking tokens or sensitive data.
+func (c *Client) doRequest(ctx context.Context, req *http.Request) ([]byte, error) {
+	_, body, err := c.doRawRequest(ctx, req)
+	return body, err
 }
 
 // doRequestJSON executes an HTTP request and unmarshals the JSON response.
-func (c *Client) doRequestJSON(req *http.Request, target any) error {
-	body, err := c.doRequest(req)
+func (c *Client) doRequestJSON(ctx context.Context, req *http.Request, target any) error {
+	body, err := c.doRequest(ctx, req)
 	if err != nil {
 		return err
 	}
 
 	if err := json.Unmarshal(body, target); err != nil {
-		return fmt.Errorf("parsing JSON response from %s: %w", req.URL.String(), err)
+		return fmt.Errorf("parsing JSON response from %s %s: %w", req.Method, sanitizeURL(req.URL), err)
 	}
 
 	return nil
+}
+
+// doRawRequest executes an HTTP request and returns both the response headers
+// and the fully read body. Retries on transient failures, auto-refreshes tokens
+// on 401, and uses ctx for cancellation. The response Body is closed before
+// returning. Errors never include the response body to avoid leaking tokens.
+func (c *Client) doRawRequest(ctx context.Context, req *http.Request) (http.Header, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var bodyBytes []byte
+	if req.Body != nil {
+		b, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading request body for %s %s: %w", req.Method, sanitizeURL(req.URL), err)
+		}
+		_ = req.Body.Close()
+		bodyBytes = b
+	}
+	reqURL := req.URL
+	method := req.Method
+	headers := req.Header.Clone()
+
+	build := func() (*http.Request, error) {
+		var body io.Reader
+		if bodyBytes != nil {
+			body = bytes.NewReader(bodyBytes)
+		}
+		r, err := http.NewRequestWithContext(ctx, method, reqURL.String(), body)
+		if err != nil {
+			return nil, err
+		}
+		r.Header = headers.Clone()
+		return r, nil
+	}
+
+	resp, err := retryDo(retryDoer{ctx: ctx, client: c.http, buildReq: build})
+	if err != nil {
+		return nil, nil, fmt.Errorf("executing %s %s: %w", method, sanitizeURL(reqURL), err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+
+		if refreshed, rerr := c.refreshFor(headers); rerr == nil && refreshed {
+			resp, err = retryDo(retryDoer{ctx: ctx, client: c.http, buildReq: build})
+			if err != nil {
+				return nil, nil, fmt.Errorf("executing %s %s: %w", method, sanitizeURL(reqURL), err)
+			}
+		} else {
+			return nil, nil, fmt.Errorf("%s %s returned status %d", method, sanitizeURL(reqURL), http.StatusUnauthorized)
+		}
+	}
+
+	respHeaders := resp.Header.Clone()
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading response from %s %s: %w", method, sanitizeURL(reqURL), err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, nil, fmt.Errorf("%s %s returned status %d", method, sanitizeURL(reqURL), resp.StatusCode)
+	}
+
+	return respHeaders, body, nil
+}
+
+// refreshFor refreshes the tokens referenced by the request headers and
+// rewrites them in place so the retry carries the new credentials.
+// Returns true when the headers were successfully updated.
+func (c *Client) refreshFor(headers http.Header) (bool, error) {
+	fresh, err := auth.EnsureFresh(c.tokens)
+	if err != nil {
+		return false, err
+	}
+	c.tokens = fresh
+
+	if authn := headers.Get("Authentication"); strings.HasPrefix(authn, "skypetoken=") {
+		newSkype, err := auth.ExchangeSkypeToken(c.tokens.Skype)
+		if err != nil {
+			return false, fmt.Errorf("exchanging skype token: %w", err)
+		}
+		c.skypeToken = newSkype
+		headers.Set("Authentication", "skypetoken="+newSkype)
+		return true, nil
+	}
+
+	if bearer := headers.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
+		// Replace with the most plausible fresh bearer. The client uses ChatSvcAgg
+		// for Teams middle tier requests and Graph for graph endpoints.
+		switch {
+		case strings.Contains(bearer, c.tokens.ChatSvcAgg) || bearer == "Bearer "+c.tokens.ChatSvcAgg:
+			headers.Set("Authorization", "Bearer "+c.tokens.ChatSvcAgg)
+		case strings.Contains(bearer, c.tokens.Graph) || bearer == "Bearer "+c.tokens.Graph:
+			headers.Set("Authorization", "Bearer "+c.tokens.Graph)
+		default:
+			headers.Set("Authorization", "Bearer "+c.tokens.ChatSvcAgg)
+		}
+		return true, nil
+	}
+
+	return false, nil
 }
