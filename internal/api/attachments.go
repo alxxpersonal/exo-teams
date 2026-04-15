@@ -2,9 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -13,65 +13,47 @@ import (
 )
 
 // UploadToOneDrive uploads a file to the "Microsoft Teams Chat Files" folder in OneDrive.
-// If the file is locked (423), retries with a deduplicated name.
-func (c *Client) UploadToOneDrive(filename string, fileData []byte) (*DriveItem, error) {
-	ext := filepath.Ext(filename)
-	base := filename[:len(filename)-len(ext)]
+// Relies on the retry layer to handle transient 423 (locked) responses.
+func (c *Client) UploadToOneDrive(ctx context.Context, filename string, fileData []byte) (*DriveItem, error) {
+	escapedName := url.PathEscape(filename)
+	uploadURL := fmt.Sprintf("%s/me/drive/root:/Microsoft Teams Chat Files/%s:/content", graphBaseURL, escapedName)
 
-	for attempt := 0; attempt < 5; attempt++ {
-		name := filename
-		if attempt > 0 {
-			name = fmt.Sprintf("%s (%d)%s", base, attempt, ext)
-		}
-
-		escapedName := url.PathEscape(name)
-		uploadURL := fmt.Sprintf("%s/me/drive/root:/Microsoft Teams Chat Files/%s:/content", graphBaseURL, escapedName)
-
-		req, err := http.NewRequest("PUT", uploadURL, bytes.NewReader(fileData))
-		if err != nil {
-			return nil, fmt.Errorf("creating upload request: %w", err)
-		}
-
-		req.Header.Set("Authorization", "Bearer "+c.tokens.Graph)
-		req.Header.Set("Content-Type", "application/octet-stream")
-
-		resp, err := c.http.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("uploading to OneDrive: %w", err)
-		}
-
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode == 423 {
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-			return nil, fmt.Errorf("OneDrive upload returned %d: %s", resp.StatusCode, string(body))
-		}
-
-		var item DriveItem
-		if err := json.Unmarshal(body, &item); err != nil {
-			return nil, fmt.Errorf("parsing upload response: %w", err)
-		}
-
-		return &item, nil
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(fileData))
+	if err != nil {
+		return nil, fmt.Errorf("creating upload request: %w", err)
 	}
 
-	return nil, fmt.Errorf("file locked after 5 attempts, try again later")
+	req.Header.Set("Authorization", "Bearer "+c.tokens.Graph)
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	body, err := c.doRequest(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("uploading to OneDrive: %w", err)
+	}
+
+	var item DriveItem
+	if err := json.Unmarshal(body, &item); err != nil {
+		return nil, fmt.Errorf("parsing upload response: %w", err)
+	}
+
+	return &item, nil
 }
 
 // createShareLink creates an organization-scoped sharing link for a OneDrive item.
-func (c *Client) createShareLink(driveItemID string) (shareURL string, shareID string, err error) {
+func (c *Client) createShareLink(ctx context.Context, driveItemID string) (shareURL string, shareID string, err error) {
 	linkBody := map[string]any{
 		"type":  "view",
 		"scope": "organization",
 	}
 
-	bodyBytes, _ := json.Marshal(linkBody)
+	bodyBytes, err := json.Marshal(linkBody)
+	if err != nil {
+		return "", "", fmt.Errorf("marshaling share link body: %w", err)
+	}
 
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/me/drive/items/%s/createLink", graphBaseURL, driveItemID), bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/me/drive/items/%s/createLink", graphBaseURL, driveItemID),
+		bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", "", fmt.Errorf("creating share link request: %w", err)
 	}
@@ -79,16 +61,9 @@ func (c *Client) createShareLink(driveItemID string) (shareURL string, shareID s
 	req.Header.Set("Authorization", "Bearer "+c.tokens.Graph)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	body, err := c.doRequest(ctx, req)
 	if err != nil {
 		return "", "", fmt.Errorf("creating share link: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", "", fmt.Errorf("share link returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
@@ -106,7 +81,7 @@ func (c *Client) createShareLink(driveItemID string) (shareURL string, shareID s
 
 // SendMessageWithFile sends a message with a file attachment to a conversation.
 // Uploads to OneDrive via Graph API, creates share link, then sends via messaging API.
-func (c *Client) SendMessageWithFile(conversationID string, message string, filename string, fileData []byte) error {
+func (c *Client) SendMessageWithFile(ctx context.Context, conversationID string, message string, filename string, fileData []byte) error {
 	baseName := filepath.Base(filename)
 	ext := filepath.Ext(baseName)
 	fileType := ext
@@ -114,14 +89,12 @@ func (c *Client) SendMessageWithFile(conversationID string, message string, file
 		fileType = ext[1:]
 	}
 
-	// Step 1: Upload to OneDrive "Microsoft Teams Chat Files"
-	item, err := c.UploadToOneDrive(baseName, fileData)
+	item, err := c.UploadToOneDrive(ctx, baseName, fileData)
 	if err != nil {
 		return fmt.Errorf("uploading to OneDrive: %w", err)
 	}
 
-	// Step 2: Create sharing link
-	shareURL, shareID, err := c.createShareLink(item.ID)
+	shareURL, shareID, err := c.createShareLink(ctx, item.ID)
 	if err != nil {
 		return fmt.Errorf("creating share link: %w", err)
 	}
@@ -130,18 +103,14 @@ func (c *Client) SendMessageWithFile(conversationID string, message string, file
 		return err
 	}
 
-	// Build siteUrl and fileUrl from the webUrl
 	fileURL := item.WebURL
-	// siteUrl is the OneDrive personal site root
 	siteURL := ""
 	if item.ParentReference != nil {
-		// Extract site URL from the webUrl (up to and including the user folder path)
 		path := item.WebURL
 		idx := 0
 		for _, marker := range []string{"/personal/", "/sites/"} {
 			pos := strings.Index(path, marker)
 			if pos >= 0 {
-				// find the next slash after the personal/username part
 				rest := path[pos+len(marker):]
 				slashPos := strings.Index(rest, "/")
 				if slashPos >= 0 {
@@ -157,19 +126,18 @@ func (c *Client) SendMessageWithFile(conversationID string, message string, file
 
 	itemID := item.ID
 
-	// Build file metadata matching real Teams format
 	fileEntry := map[string]any{
-		"@type":    "http://schema.skype.com/File",
-		"version":  2,
-		"id":       itemID,
-		"itemid":   itemID,
-		"fileName": baseName,
-		"fileType": fileType,
-		"baseUrl":  siteURL,
+		"@type":     "http://schema.skype.com/File",
+		"version":   2,
+		"id":        itemID,
+		"itemid":    itemID,
+		"fileName":  baseName,
+		"fileType":  fileType,
+		"baseUrl":   siteURL,
 		"objectUrl": fileURL,
-		"type":     fileType,
-		"title":    baseName,
-		"state":    "active",
+		"type":      fileType,
+		"title":     baseName,
+		"state":     "active",
 		"permissionScope": "users",
 		"fileInfo": map[string]any{
 			"itemId":            nil,
@@ -194,12 +162,15 @@ func (c *Client) SendMessageWithFile(conversationID string, message string, file
 			"listId":           item.SharePointIDs.ListID,
 			"listItemUniqueId": item.SharePointIDs.ListItemUniqueID,
 			"siteId":           item.SharePointIDs.SiteID,
-			"siteUrl":          item.SharePointIDs.SiteURL,
+			"siteUrl":           item.SharePointIDs.SiteURL,
 			"webId":            item.SharePointIDs.WebID,
 		}
 	}
 
-	filesJSON, _ := json.Marshal([]any{fileEntry})
+	filesJSON, err := json.Marshal([]any{fileEntry})
+	if err != nil {
+		return fmt.Errorf("marshaling file metadata: %w", err)
+	}
 
 	clientMsgID := fmt.Sprintf("%d", time.Now().UnixMilli())
 
@@ -217,10 +188,13 @@ func (c *Client) SendMessageWithFile(conversationID string, message string, file
 		},
 	}
 
-	bodyBytes, _ := json.Marshal(msgBody)
+	bodyBytes, err := json.Marshal(msgBody)
+	if err != nil {
+		return fmt.Errorf("marshaling message body: %w", err)
+	}
 
 	sendURL := fmt.Sprintf("%s/users/ME/conversations/%s/messages", msgBaseURL, url.PathEscape(conversationID))
-	req, err := http.NewRequest("POST", sendURL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sendURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("creating send request: %w", err)
 	}
@@ -228,17 +202,9 @@ func (c *Client) SendMessageWithFile(conversationID string, message string, file
 	req.Header.Set("Authentication", "skypetoken="+c.skypeToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
-	if err != nil {
+	if _, err := c.doRequest(ctx, req); err != nil {
 		return fmt.Errorf("sending message with file: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("send returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	return nil
 }
-

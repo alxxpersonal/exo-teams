@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,7 +17,7 @@ type UserProfile struct {
 
 // ResolveUserProfiles fetches display names for a list of MRI identifiers via Graph API.
 // MRIs look like "8:orgid:uuid-here". We extract the UUID and query Graph.
-func (c *Client) ResolveUserProfiles(mris []string) (map[string]string, error) {
+func (c *Client) ResolveUserProfiles(ctx context.Context, mris []string) (map[string]string, error) {
 	if len(mris) == 0 {
 		return nil, nil
 	}
@@ -24,22 +25,24 @@ func (c *Client) ResolveUserProfiles(mris []string) (map[string]string, error) {
 	result := make(map[string]string)
 
 	for _, mri := range mris {
-		// Extract UUID from MRI (8:orgid:uuid -> uuid)
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		if !strings.HasPrefix(mri, "8:orgid:") {
-			continue // skip non-orgid MRIs
+			continue
 		}
 		userID := strings.TrimPrefix(mri, "8:orgid:")
 
 		endpoint := fmt.Sprintf("https://graph.microsoft.com/v1.0/users/%s?$select=displayName", userID)
 
-		req, err := http.NewRequest("GET", endpoint, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			continue
 		}
 
 		req.Header.Set("Authorization", "Bearer "+c.tokens.Graph)
 
-		respBody, err := c.doRequest(req)
+		respBody, err := c.doRequest(ctx, req)
 		if err != nil {
 			continue
 		}
@@ -60,8 +63,7 @@ func (c *Client) ResolveUserProfiles(mris []string) (map[string]string, error) {
 }
 
 // ResolveChatNames resolves member names for chats that have empty titles.
-func (c *Client) ResolveChatNames(chats []Chat) {
-	// Collect unique MRIs from chats with no title
+func (c *Client) ResolveChatNames(ctx context.Context, chats []Chat) {
 	mriSet := make(map[string]bool)
 	for _, chat := range chats {
 		if chat.Title == "" {
@@ -77,17 +79,16 @@ func (c *Client) ResolveChatNames(chats []Chat) {
 		return
 	}
 
-	var mris []string
+	mris := make([]string, 0, len(mriSet))
 	for mri := range mriSet {
 		mris = append(mris, mri)
 	}
 
-	names, err := c.ResolveUserProfiles(mris)
+	names, err := c.ResolveUserProfiles(ctx, mris)
 	if err != nil {
 		return // silently fail, names just stay empty
 	}
 
-	// Update chat member friendly names
 	for i := range chats {
 		for j := range chats[i].Members {
 			if name, ok := names[chats[i].Members[j].Mri]; ok {

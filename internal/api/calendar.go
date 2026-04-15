@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -8,17 +9,17 @@ import (
 
 // CalendarEvent represents a calendar event.
 type CalendarEvent struct {
-	ID           string        `json:"id"`
-	Subject      string        `json:"subject"`
-	Start        *DateTimeZone `json:"start,omitempty"`
-	End          *DateTimeZone `json:"end,omitempty"`
-	Location     *Location     `json:"location,omitempty"`
-	IsOnlineMeeting bool      `json:"isOnlineMeeting"`
-	OnlineMeetingURL string   `json:"onlineMeetingUrl"`
-	BodyPreview  string        `json:"bodyPreview"`
-	Organizer    *Attendee     `json:"organizer,omitempty"`
-	IsAllDay     bool          `json:"isAllDay"`
-	IsCancelled  bool          `json:"isCancelled"`
+	ID               string        `json:"id"`
+	Subject          string        `json:"subject"`
+	Start            *DateTimeZone `json:"start,omitempty"`
+	End              *DateTimeZone `json:"end,omitempty"`
+	Location         *Location     `json:"location,omitempty"`
+	IsOnlineMeeting  bool          `json:"isOnlineMeeting"`
+	OnlineMeetingURL string        `json:"onlineMeetingUrl"`
+	BodyPreview      string        `json:"bodyPreview"`
+	Organizer        *Attendee     `json:"organizer,omitempty"`
+	IsAllDay         bool          `json:"isAllDay"`
+	IsCancelled      bool          `json:"isCancelled"`
 }
 
 // DateTimeZone represents a date-time with its time zone.
@@ -44,17 +45,17 @@ type EmailAddress struct {
 }
 
 // GetCalendarEvents returns upcoming calendar events.
-func (g *GraphClient) GetCalendarEvents(daysAhead int) ([]CalendarEvent, error) {
+func (g *GraphClient) GetCalendarEvents(ctx context.Context, daysAhead int) ([]CalendarEvent, error) {
 	now := time.Now().UTC()
 	end := now.AddDate(0, 0, daysAhead)
 
 	startStr := now.Format("2006-01-02T15:04:05")
 	endStr := end.Format("2006-01-02T15:04:05")
 
-	url := fmt.Sprintf("%s/me/calendarView?startDateTime=%s&endDateTime=%s&$orderby=start/dateTime&$top=50",
+	endpoint := fmt.Sprintf("%s/me/calendarView?startDateTime=%s&endDateTime=%s&$orderby=start/dateTime&$top=50",
 		graphBaseURL, startStr, endStr)
 
-	body, err := g.graphRequest(url)
+	body, err := g.graphRequest(ctx, endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("fetching calendar: %w", err)
 	}
