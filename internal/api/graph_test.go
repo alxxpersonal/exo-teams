@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -37,7 +38,7 @@ func TestDoAuthRequest_SetsAuthHeader(t *testing.T) {
 	gc, srv := newTestGraphClient(handler)
 	defer srv.Close()
 
-	body, err := gc.doAuthRequest(srv.URL+"/test", gc.token)
+	body, err := gc.doAuthRequest(context.Background(), srv.URL+"/test", tokenGraph)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +56,7 @@ func TestDoAuthRequest_NonOKStatus(t *testing.T) {
 	gc, srv := newTestGraphClient(handler)
 	defer srv.Close()
 
-	_, err := gc.doAuthRequest(srv.URL+"/test", gc.token)
+	_, err := gc.doAuthRequest(context.Background(), srv.URL+"/test", tokenGraph)
 	if err == nil {
 		t.Error("expected error for 403 response")
 	}
@@ -80,7 +81,7 @@ func TestGetClasses_ParsesResponse(t *testing.T) {
 
 	// We can't easily redirect the assignmentsBaseURL, so test the parsing logic
 	// by calling doAuthRequest directly and checking the structure
-	body, _ := gc.doAuthRequest(srv.URL+"/classes", gc.assignmentsToken)
+	body, _ := gc.doAuthRequest(context.Background(), srv.URL+"/classes", tokenAssignments)
 
 	var resp graphListResponse[EducationClass]
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -113,7 +114,7 @@ func TestAssignmentsRequest_FallsBackToGraphToken(t *testing.T) {
 	// No assignments token set - should fall back to graph token
 	defer srv.Close()
 
-	_, err := gc.assignmentsRequest(srv.URL + "/test")
+	_, err := gc.assignmentsRequest(context.Background(), srv.URL + "/test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -166,7 +167,7 @@ func TestDownloadFile_ReturnsBytes(t *testing.T) {
 	gc, srv := newTestGraphClient(handler)
 	defer srv.Close()
 
-	data, err := gc.DownloadFile(srv.URL + "/download")
+	data, err := gc.DownloadFile(context.Background(), srv.URL + "/download")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestDownloadFile_NonOKStatus(t *testing.T) {
 	gc, srv := newTestGraphClient(handler)
 	defer srv.Close()
 
-	_, err := gc.DownloadFile(srv.URL + "/download")
+	_, err := gc.DownloadFile(context.Background(), srv.URL + "/download")
 	if err == nil {
 		t.Error("expected error for 404")
 	}
