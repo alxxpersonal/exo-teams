@@ -17,8 +17,11 @@ import (
 
 const (
 	teamsBaseURL = "https://teams.microsoft.com/api/csa/api/v1"
-	msgBaseURL   = "https://emea.ng.msg.teams.microsoft.com/v1"
 )
+
+// msgBaseURL is the internal Teams messaging endpoint.
+// Exposed as a var so tests can redirect it to an httptest server.
+var msgBaseURL = "https://emea.ng.msg.teams.microsoft.com/v1"
 
 // Client is the Teams internal API client.
 type Client struct {
