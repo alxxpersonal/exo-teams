@@ -17,9 +17,19 @@ const (
 	// Teams desktop client ID (public client, no secret needed)
 	teamsClientID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"
 	// Scopes needed for Teams internal API access
-	teamsScope    = "https://api.spaces.skype.com/.default offline_access"
+	teamsScope = "https://api.spaces.skype.com/.default offline_access"
+)
+
+// OAuth endpoints. Declared as vars so tests can override them to point at a
+// fake server. Defaults are the real Microsoft login endpoints.
+var (
 	tokenURL      = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 	deviceCodeURL = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
+
+	// pollSleep is the per-iteration delay in pollForToken. Declared as a var
+	// so tests can shrink it. Default multiplies the server-provided interval
+	// (seconds) by time.Second.
+	pollSleep = func(interval int) { time.Sleep(time.Duration(interval) * time.Second) }
 )
 
 // OAuthTokenResponse is the response from the OAuth token endpoint.
@@ -142,7 +152,7 @@ func requestDeviceCode() (*DeviceCodeResponse, error) {
 		"scope":     {teamsScope},
 	}
 
-	resp, err := http.PostForm(deviceCodeURL, data)
+	resp, err := http.PostForm(deviceCodeURL, data) //nolint:gosec // URL is a package var for test injection, defaulted to the real endpoint
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +184,7 @@ func pollForToken(dc *DeviceCodeResponse) (*OAuthTokenResponse, error) {
 	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
 
 	for time.Now().Before(deadline) {
-		time.Sleep(time.Duration(interval) * time.Second)
+		pollSleep(interval)
 
 		data := url.Values{
 			"client_id":   {teamsClientID},
@@ -182,7 +192,7 @@ func pollForToken(dc *DeviceCodeResponse) (*OAuthTokenResponse, error) {
 			"device_code": {dc.DeviceCode},
 		}
 
-		resp, err := http.PostForm(tokenURL, data)
+		resp, err := http.PostForm(tokenURL, data) //nolint:gosec // URL is a package var for test injection, defaulted to the real endpoint
 		if err != nil {
 			continue
 		}
@@ -237,7 +247,7 @@ func requestTokenWithScope(refreshToken, scope string) (*OAuthTokenResponse, err
 }
 
 func postTokenRequest(data url.Values) (*OAuthTokenResponse, error) {
-	resp, err := http.PostForm(tokenURL, data)
+	resp, err := http.PostForm(tokenURL, data) //nolint:gosec // URL is a package var for test injection, defaulted to the real endpoint
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
