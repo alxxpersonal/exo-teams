@@ -2,9 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,7 +15,7 @@ import (
 // Uses the derived skypetoken for authentication.
 // NOTE: The messages endpoint uses "Authentication: skypetoken=<value>" header,
 // NOT "Authorization: Bearer <value>".
-func (c *Client) GetMessages(conversationID string, pageSize int) ([]ChatMessage, error) {
+func (c *Client) GetMessages(ctx context.Context, conversationID string, pageSize int) ([]ChatMessage, error) {
 	if err := c.EnsureSkypeToken(); err != nil {
 		return nil, err
 	}
@@ -28,17 +28,16 @@ func (c *Client) GetMessages(conversationID string, pageSize int) ([]ChatMessage
 	endpoint := fmt.Sprintf("%s/users/ME/conversations/%s/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=%d&startTime=1",
 		msgBaseURL, encoded, pageSize)
 
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating messages request: %w", err)
 	}
 
-	// IMPORTANT: Authentication header, NOT Authorization. And skypetoken= prefix, NOT Bearer.
 	req.Header.Set("Authentication", "skypetoken="+c.skypeToken)
 	req.Header.Set("Accept", "application/json")
 
 	var resp MessagesResponse
-	if err := c.doRequestJSON(req, &resp); err != nil {
+	if err := c.doRequestJSON(ctx, req, &resp); err != nil {
 		return nil, fmt.Errorf("fetching messages for %s: %w", conversationID, err)
 	}
 
@@ -47,7 +46,7 @@ func (c *Client) GetMessages(conversationID string, pageSize int) ([]ChatMessage
 
 // GetMessagesPage fetches a single page of messages and returns both messages and metadata.
 // Used for pagination support.
-func (c *Client) GetMessagesPage(conversationID string, pageSize int) ([]ChatMessage, *MessageMetadata, error) {
+func (c *Client) GetMessagesPage(ctx context.Context, conversationID string, pageSize int) ([]ChatMessage, *MessageMetadata, error) {
 	if err := c.EnsureSkypeToken(); err != nil {
 		return nil, nil, err
 	}
@@ -60,7 +59,7 @@ func (c *Client) GetMessagesPage(conversationID string, pageSize int) ([]ChatMes
 	endpoint := fmt.Sprintf("%s/users/ME/conversations/%s/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=%d&startTime=1",
 		msgBaseURL, encoded, pageSize)
 
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating messages request: %w", err)
 	}
@@ -69,7 +68,7 @@ func (c *Client) GetMessagesPage(conversationID string, pageSize int) ([]ChatMes
 	req.Header.Set("Accept", "application/json")
 
 	var resp MessagesResponse
-	if err := c.doRequestJSON(req, &resp); err != nil {
+	if err := c.doRequestJSON(ctx, req, &resp); err != nil {
 		return nil, nil, fmt.Errorf("fetching messages for %s: %w", conversationID, err)
 	}
 
@@ -78,7 +77,7 @@ func (c *Client) GetMessagesPage(conversationID string, pageSize int) ([]ChatMes
 
 // GetMessagesFromURL fetches messages from a direct URL (used for pagination via backwardLink).
 // The URL is validated to ensure credentials are not sent to untrusted hosts.
-func (c *Client) GetMessagesFromURL(pageURL string) ([]ChatMessage, *MessageMetadata, error) {
+func (c *Client) GetMessagesFromURL(ctx context.Context, pageURL string) ([]ChatMessage, *MessageMetadata, error) {
 	if err := c.EnsureSkypeToken(); err != nil {
 		return nil, nil, err
 	}
@@ -87,7 +86,7 @@ func (c *Client) GetMessagesFromURL(pageURL string) ([]ChatMessage, *MessageMeta
 		return nil, nil, fmt.Errorf("refusing to send credentials to untrusted URL: %s", pageURL)
 	}
 
-	req, err := http.NewRequest("GET", pageURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating messages request: %w", err)
 	}
@@ -96,7 +95,7 @@ func (c *Client) GetMessagesFromURL(pageURL string) ([]ChatMessage, *MessageMeta
 	req.Header.Set("Accept", "application/json")
 
 	var resp MessagesResponse
-	if err := c.doRequestJSON(req, &resp); err != nil {
+	if err := c.doRequestJSON(ctx, req, &resp); err != nil {
 		return nil, nil, fmt.Errorf("fetching messages page: %w", err)
 	}
 
@@ -105,8 +104,8 @@ func (c *Client) GetMessagesFromURL(pageURL string) ([]ChatMessage, *MessageMeta
 
 // GetAllMessages fetches all messages from a conversation by following backwardLink pagination.
 // maxPages limits the number of pages fetched (0 = unlimited).
-func (c *Client) GetAllMessages(conversationID string, pageSize int, maxPages int) ([]ChatMessage, error) {
-	messages, metadata, err := c.GetMessagesPage(conversationID, pageSize)
+func (c *Client) GetAllMessages(ctx context.Context, conversationID string, pageSize int, maxPages int) ([]ChatMessage, error) {
+	messages, metadata, err := c.GetMessagesPage(ctx, conversationID, pageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +118,11 @@ func (c *Client) GetAllMessages(conversationID string, pageSize int, maxPages in
 		if maxPages > 0 && page >= maxPages {
 			break
 		}
+		if err := ctx.Err(); err != nil {
+			return allMessages, err
+		}
 
-		msgs, meta, err := c.GetMessagesFromURL(metadata.BackwardLink)
+		msgs, meta, err := c.GetMessagesFromURL(ctx, metadata.BackwardLink)
 		if err != nil {
 			break // return what we have so far
 		}
@@ -134,14 +136,13 @@ func (c *Client) GetAllMessages(conversationID string, pageSize int, maxPages in
 }
 
 // MarkConversationRead marks a conversation as read by updating the consumption horizon.
-func (c *Client) MarkConversationRead(conversationID string) error {
+func (c *Client) MarkConversationRead(ctx context.Context, conversationID string) error {
 	if err := c.EnsureSkypeToken(); err != nil {
 		return err
 	}
 
 	encoded := url.PathEscape(conversationID)
 
-	// Set consumption horizon to current time.
 	now := time.Now().UnixMilli()
 	payload := map[string]string{
 		"consumptionhorizon": fmt.Sprintf("%d;%d;%d", now, now, now),
@@ -154,7 +155,7 @@ func (c *Client) MarkConversationRead(conversationID string) error {
 	endpoint := fmt.Sprintf("%s/users/ME/conversations/%s/properties?name=consumptionhorizon",
 		msgBaseURL, encoded)
 
-	req, err := http.NewRequest("PUT", endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("creating mark-read request: %w", err)
 	}
@@ -162,15 +163,8 @@ func (c *Client) MarkConversationRead(conversationID string) error {
 	req.Header.Set("Authentication", "skypetoken="+c.skypeToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
-	if err != nil {
+	if _, err := c.doRequest(ctx, req); err != nil {
 		return fmt.Errorf("marking conversation read: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("mark-read returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
@@ -178,17 +172,15 @@ func (c *Client) MarkConversationRead(conversationID string) error {
 
 // StartNewDM creates a new 1:1 conversation with a user by their MRI or object ID.
 // Returns the conversation ID for the new DM.
-func (c *Client) StartNewDM(userMRI string) (string, error) {
+func (c *Client) StartNewDM(ctx context.Context, userMRI string) (string, error) {
 	if err := c.EnsureSkypeToken(); err != nil {
 		return "", err
 	}
 
-	// Ensure MRI format for the target user.
 	if !strings.HasPrefix(userMRI, "8:orgid:") {
 		userMRI = "8:orgid:" + userMRI
 	}
 
-	// Extract the current user's object ID from the Skype JWT.
 	selfOID, err := c.getUserObjectID()
 	if err != nil {
 		return "", fmt.Errorf("getting self object ID for DM: %w", err)
@@ -224,7 +216,7 @@ func (c *Client) StartNewDM(userMRI string) (string, error) {
 
 	endpoint := fmt.Sprintf("%s/users/ME/conversations", msgBaseURL)
 
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("creating new DM request: %w", err)
 	}
@@ -232,28 +224,18 @@ func (c *Client) StartNewDM(userMRI string) (string, error) {
 	req.Header.Set("Authentication", "skypetoken="+c.skypeToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	respHeaders, respBody, err := c.doRawRequest(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("creating new DM: %w", err)
 	}
-	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("create DM returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	// The Location header or response body contains the conversation ID.
-	location := resp.Header.Get("Location")
-	if location != "" {
+	if location := respHeaders.Get("Location"); location != "" {
 		parts := strings.Split(location, "/conversations/")
 		if len(parts) > 1 {
 			return parts[1], nil
 		}
 	}
 
-	// Try parsing from response body.
 	var result struct {
 		ID string `json:"id"`
 	}
@@ -265,7 +247,7 @@ func (c *Client) StartNewDM(userMRI string) (string, error) {
 }
 
 // SendMessage sends a message to a conversation via the internal API.
-func (c *Client) SendMessage(conversationID string, content string) error {
+func (c *Client) SendMessage(ctx context.Context, conversationID string, content string) error {
 	if err := c.EnsureSkypeToken(); err != nil {
 		return err
 	}
@@ -291,7 +273,7 @@ func (c *Client) SendMessage(conversationID string, content string) error {
 		return fmt.Errorf("marshaling message body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("creating send request: %w", err)
 	}
@@ -299,15 +281,8 @@ func (c *Client) SendMessage(conversationID string, content string) error {
 	req.Header.Set("Authentication", "skypetoken="+c.skypeToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
-	if err != nil {
+	if _, err := c.doRequest(ctx, req); err != nil {
 		return fmt.Errorf("sending message: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("send returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
