@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -46,7 +47,7 @@ func TestDoRequest_Success(t *testing.T) {
 	defer srv.Close()
 
 	req, _ := http.NewRequest("GET", srv.URL+"/test", nil)
-	body, err := client.doRequest(req)
+	body, err := client.doRequest(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestDoRequest_NonSuccessStatus(t *testing.T) {
 			defer srv.Close()
 
 			req, _ := http.NewRequest("GET", srv.URL+"/test", nil)
-			_, err := client.doRequest(req)
+			_, err := client.doRequest(context.Background(), req)
 			if err == nil {
 				t.Errorf("expected error for status %d", code)
 			}
@@ -94,7 +95,7 @@ func TestDoRequestJSON_ParsesResponse(t *testing.T) {
 		Name string `json:"name"`
 	}
 
-	if err := client.doRequestJSON(req, &result); err != nil {
+	if err := client.doRequestJSON(context.Background(), req, &result); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -114,7 +115,7 @@ func TestDoRequestJSON_BadJSON(t *testing.T) {
 	req, _ := http.NewRequest("GET", srv.URL+"/test", nil)
 
 	var result map[string]any
-	err := client.doRequestJSON(req, &result)
+	err := client.doRequestJSON(context.Background(), req, &result)
 	if err == nil {
 		t.Error("expected error for bad JSON")
 	}
@@ -217,7 +218,7 @@ func TestGetMessagesFromURL_RejectsUntrustedURL(t *testing.T) {
 		tokens:     &auth.Tokens{},
 	}
 
-	_, _, err := client.GetMessagesFromURL("https://evil.com/steal-token")
+	_, _, err := client.GetMessagesFromURL(context.Background(), "https://evil.com/steal-token")
 	if err == nil {
 		t.Error("expected error for untrusted URL")
 	}
