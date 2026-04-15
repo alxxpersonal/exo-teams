@@ -176,28 +176,10 @@ func listTeamsCmd() *cobra.Command {
 			}
 
 			if jsonOutput {
-				return outputJSON(teams)
+				return emitJSON(teams)
 			}
 
-			for _, team := range teams {
-				archived := ""
-				if team.IsArchived {
-					archived = " [archived]"
-				}
-				fmt.Printf("== %s%s ==\n", team.DisplayName, archived)
-				if team.Description != "" {
-					fmt.Printf("   %s\n", team.Description)
-				}
-				for _, ch := range team.Channels {
-					general := ""
-					if ch.IsGeneral {
-						general = " (general)"
-					}
-					fmt.Printf("   #%-30s %s%s\n", ch.DisplayName, ch.ID, general)
-				}
-				fmt.Println()
-			}
-
+			fmt.Print(renderTeamsTable(teams))
 			return nil
 		},
 	}
@@ -225,48 +207,10 @@ func listChatsCmd() *cobra.Command {
 			client.ResolveChatNames(ctx, chats)
 
 			if jsonOutput {
-				return outputJSON(chats)
+				return emitJSON(chats)
 			}
 
-			for _, chat := range chats {
-				chatType := "group"
-				if chat.IsOneOnOne {
-					chatType = "DM"
-				}
-
-				title := chat.Title
-				if title == "" {
-					title = formatMemberNames(chat.Members)
-				}
-				if title == "" {
-					title = "(unnamed)"
-				}
-
-				lastMsg := ""
-				if chat.LastMessage != nil && chat.LastMessage.Content != "" {
-					content := stripHTML(chat.LastMessage.Content)
-					if len(content) > 80 {
-						content = content[:80] + "..."
-					}
-					sender := chat.LastMessage.ImDisplayName
-					if sender != "" {
-						lastMsg = fmt.Sprintf("  %s: %s", sender, content)
-					} else {
-						lastMsg = "  " + content
-					}
-				}
-
-				readMarker := " "
-				if r, ok := chat.IsRead.(bool); ok && !r {
-					readMarker = "*"
-				}
-
-				fmt.Printf("%s [%-5s] %-40s %s\n", readMarker, chatType, title, chat.ID)
-				if lastMsg != "" {
-					fmt.Printf("         %s\n", lastMsg)
-				}
-			}
-
+			fmt.Print(renderChatsTable(chats))
 			return nil
 		},
 	}
@@ -337,14 +281,10 @@ func getMessagesCmd() *cobra.Command {
 			}
 
 			if jsonOutput {
-				return outputJSON(messages)
+				return emitJSON(messages)
 			}
 
-			if showReplies {
-				printMessagesWithReplies(messages)
-			} else {
-				printMessages(messages)
-			}
+			fmt.Print(renderMessages(messages, showReplies))
 			return nil
 		},
 	}
@@ -445,14 +385,10 @@ func getChatCmd() *cobra.Command {
 			}
 
 			if jsonOutput {
-				return outputJSON(messages)
+				return emitJSON(messages)
 			}
 
-			if showReplies {
-				printMessagesWithReplies(messages)
-			} else {
-				printMessages(messages)
-			}
+			fmt.Print(renderMessages(messages, showReplies))
 			return nil
 		},
 	}
@@ -479,7 +415,10 @@ func sendCmd() *cobra.Command {
 			if err := client.SendMessage(ctx, args[0], args[1]); err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stderr, "message sent")
+			statusf("message sent")
+			if jsonOutput {
+				return emitOK("")
+			}
 			return nil
 		},
 	}
@@ -514,7 +453,7 @@ func sendFileCmd() *cobra.Command {
 					return fmt.Errorf("reading file %s: %w", filePath, err)
 				}
 
-				fmt.Fprintf(os.Stderr, "uploading %s (%d KB)...\n", filePath, len(fileData)/1024)
+				statusf("uploading %s (%d KB)...", filePath, len(fileData)/1024)
 
 				msg := ""
 				if i == 0 {
@@ -525,9 +464,12 @@ func sendFileCmd() *cobra.Command {
 					return fmt.Errorf("sending file %s: %w", filePath, err)
 				}
 
-				fmt.Fprintf(os.Stderr, "file sent (%d/%d)\n", i+1, len(files))
+				statusf("file sent (%d/%d)", i+1, len(files))
 			}
 
+			if jsonOutput {
+				return emitOK("")
+			}
 			return nil
 		},
 	}
@@ -599,7 +541,7 @@ func newDMCmd() *cobra.Command {
 				return fmt.Errorf("no user found matching %q", args[0])
 			}
 
-			fmt.Fprintf(os.Stderr, "found user: %s (%s)\n", matchedUser.DisplayName, matchedUser.Mail)
+			statusf("found user: %s (%s)", matchedUser.DisplayName, matchedUser.Mail)
 
 			// Create DM
 			client, err := api.NewClient()
@@ -608,20 +550,23 @@ func newDMCmd() *cobra.Command {
 			}
 
 			mri := "8:orgid:" + matchedUser.ID
-			fmt.Fprintln(os.Stderr, "creating conversation...")
+			statusf("creating conversation...")
 			convID, err := client.StartNewDM(ctx, mri)
 			if err != nil {
 				return fmt.Errorf("creating DM: %w", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "conversation created: %s\n", convID)
+			statusf("conversation created: %s", convID)
 
 			// Send message
 			if err := client.SendMessage(ctx, convID, message); err != nil {
 				return fmt.Errorf("sending message: %w", err)
 			}
 
-			fmt.Fprintln(os.Stderr, "message sent")
+			statusf("message sent")
+			if jsonOutput {
+				return emitOK(convID)
+			}
 			return nil
 		},
 	}
@@ -729,7 +674,10 @@ func downloadCmd() *cobra.Command {
 				return fmt.Errorf("writing file: %w", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "saved to %s\n", outPath)
+			statusf("saved to %s", outPath)
+			if jsonOutput {
+				return emitJSON(map[string]any{"ok": true, "path": outPath, "size": len(data)})
+			}
 			return nil
 		},
 	}
@@ -752,7 +700,7 @@ func activityCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintln(os.Stderr, "fetching activity feed...")
+			statusf("fetching activity feed...")
 
 			items, err := client.GetActivity(ctx, 30)
 			if err != nil {
@@ -760,44 +708,10 @@ func activityCmd() *cobra.Command {
 			}
 
 			if jsonOutput {
-				return outputJSON(items)
+				return emitJSON(items)
 			}
 
-			if len(items) == 0 {
-				fmt.Println("no recent activity")
-				return nil
-			}
-
-			for _, item := range items {
-				ts := formatTimestamp(item.ComposeTime)
-
-				actType := ""
-				sender := ""
-				if item.Properties != nil && item.Properties.Activity != nil {
-					actType = item.Properties.Activity.ActivityType
-					sender = item.Properties.Activity.SourceUserImDisplayName
-				}
-				if actType == "" {
-					actType = item.MessageType
-				}
-				if sender == "" {
-					sender = item.ImDisplayName
-				}
-				if sender == "" {
-					sender = "system"
-				}
-
-				content := stripHTML(item.Content)
-				if len(content) > 120 {
-					content = content[:120] + "..."
-				}
-
-				fmt.Printf("[%s] %-10s %s\n", ts, actType, sender)
-				if content != "" {
-					fmt.Printf("  %s\n", content)
-				}
-			}
-
+			fmt.Print(renderActivity(items))
 			return nil
 		},
 	}
@@ -819,7 +733,7 @@ func searchCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(os.Stderr, "searching for %q...\n", query)
+			statusf("searching for %q...", query)
 
 			graphClient := api.NewGraphClient(tokens.Graph)
 			hits, err := graphClient.SearchMessages(ctx, query)
@@ -828,102 +742,10 @@ func searchCmd() *cobra.Command {
 			}
 
 			if jsonOutput {
-				return outputJSON(hits)
+				return emitJSON(hits)
 			}
 
-			if len(hits) == 0 {
-				fmt.Println("no results found")
-				return nil
-			}
-
-			for _, hit := range hits {
-				summary := stripHTML(hit.Summary)
-				if summary == "" {
-					summary = "(no preview)"
-				}
-
-				// Extract useful fields from resource
-				sender := ""
-				timestamp := ""
-				chatName := ""
-				body := ""
-				itemName := ""
-
-				if hit.Resource != nil {
-					// Message-type results
-					if from, ok := hit.Resource["from"].(map[string]any); ok {
-						if device, ok := from["device"].(map[string]any); ok {
-							if name, ok := device["displayName"].(string); ok {
-								sender = name
-							}
-						}
-						if user, ok := from["user"].(map[string]any); ok {
-							if name, ok := user["displayName"].(string); ok {
-								sender = name
-							}
-						}
-					}
-					// Email sender
-					if emailSender, ok := hit.Resource["sender"].(map[string]any); ok {
-						if addr, ok := emailSender["emailAddress"].(map[string]any); ok {
-							if name, ok := addr["name"].(string); ok {
-								sender = name
-							}
-						}
-					}
-					if ts, ok := hit.Resource["createdDateTime"].(string); ok {
-						timestamp = formatTimestamp(ts)
-					}
-					if name, ok := hit.Resource["channelIdentity"].(map[string]any); ok {
-						if cn, ok := name["channelId"].(string); ok {
-							chatName = cn
-						}
-					}
-					if b, ok := hit.Resource["body"].(map[string]any); ok {
-						if content, ok := b["content"].(string); ok {
-							body = stripHTML(content)
-							if len(body) > 150 {
-								body = body[:150] + "..."
-							}
-						}
-					}
-					// DriveItem results
-					if name, ok := hit.Resource["name"].(string); ok {
-						itemName = name
-					}
-					if subject, ok := hit.Resource["subject"].(string); ok && body == "" {
-						body = subject
-					}
-					// bodyPreview for emails
-					if preview, ok := hit.Resource["bodyPreview"].(string); ok && body == "" {
-						body = stripHTML(preview)
-						if len(body) > 150 {
-							body = body[:150] + "..."
-						}
-					}
-				}
-
-				if timestamp != "" {
-					fmt.Printf("[%s] ", timestamp)
-				}
-				if itemName != "" {
-					fmt.Printf("[file] %s", itemName)
-				} else if sender != "" {
-					fmt.Printf("%s", sender)
-				}
-				if chatName != "" {
-					fmt.Printf(" in %s", chatName)
-				}
-				fmt.Println()
-
-				if body != "" {
-					fmt.Printf("  %s\n", body)
-				} else if summary != "" {
-					fmt.Printf("  %s\n", summary)
-				}
-				fmt.Println()
-			}
-
+			fmt.Print(renderSearchHits(hits))
 			return nil
 		},
 	}
@@ -971,128 +793,6 @@ func formatMemberNames(members []api.ChatMember) string {
 	return fmt.Sprintf("%s, %s +%d more", names[0], names[1], len(names)-2)
 }
 
-func formatReactions(msg api.ChatMessage) string {
-	emotions := msg.GetEmotions()
-	if len(emotions) == 0 {
-		return ""
-	}
-
-	var parts []string
-	for key, count := range emotions {
-		parts = append(parts, fmt.Sprintf("%s: %d", key, count))
-	}
-	return " [" + strings.Join(parts, ", ") + "]"
-}
-
-func printMessages(messages []api.ChatMessage) {
-	for i := len(messages) - 1; i >= 0; i-- {
-		msg := messages[i]
-
-		// Skip system/control messages
-		if msg.MessageType != "RichText/Html" && msg.MessageType != "Text" && msg.MessageType != "RichText" {
-			continue
-		}
-
-		content := stripHTML(msg.Content)
-		if content == "" {
-			continue
-		}
-
-		ts := formatTimestamp(msg.ComposeTime)
-		sender := msg.ImDisplayName
-		if sender == "" {
-			sender = "unknown"
-		}
-
-		reactions := formatReactions(msg)
-		fmt.Printf("[%s] %s: %s%s\n", ts, sender, content, reactions)
-	}
-}
-
-func printMessagesWithReplies(messages []api.ChatMessage) {
-	// Group messages: top-level messages and their replies
-	type thread struct {
-		root    *api.ChatMessage
-		replies []*api.ChatMessage
-	}
-
-	threadMap := make(map[string]*thread)
-	var topLevel []*thread
-
-	// First pass: identify all messages by ID
-	msgByID := make(map[string]*api.ChatMessage)
-	for i := range messages {
-		msgByID[messages[i].ID] = &messages[i]
-	}
-
-	// Second pass: group into threads
-	for i := range messages {
-		msg := &messages[i]
-
-		// Skip system/control messages
-		if msg.MessageType != "RichText/Html" && msg.MessageType != "Text" && msg.MessageType != "RichText" {
-			continue
-		}
-
-		parentID := msg.ParentMessageID()
-		if parentID == "" {
-			// Top-level message
-			t := &thread{root: msg}
-			threadMap[msg.ID] = t
-			topLevel = append(topLevel, t)
-		} else {
-			// Reply - attach to parent thread
-			if t, ok := threadMap[parentID]; ok {
-				t.replies = append(t.replies, msg)
-			} else {
-				// Parent not found yet, create a placeholder thread
-				t := &thread{replies: []*api.ChatMessage{msg}}
-				threadMap[parentID] = t
-				// Check if parent exists in our messages
-				if parent, ok := msgByID[parentID]; ok {
-					t.root = parent
-				}
-				topLevel = append(topLevel, t)
-			}
-		}
-	}
-
-	// Print threads in reverse order (oldest first)
-	for i := len(topLevel) - 1; i >= 0; i-- {
-		t := topLevel[i]
-
-		if t.root != nil {
-			content := stripHTML(t.root.Content)
-			if content == "" {
-				continue
-			}
-			ts := formatTimestamp(t.root.ComposeTime)
-			sender := t.root.ImDisplayName
-			if sender == "" {
-				sender = "unknown"
-			}
-			reactions := formatReactions(*t.root)
-			fmt.Printf("[%s] %s: %s%s\n", ts, sender, content, reactions)
-		}
-
-		// Print replies indented
-		for j := len(t.replies) - 1; j >= 0; j-- {
-			reply := t.replies[j]
-			content := stripHTML(reply.Content)
-			if content == "" {
-				continue
-			}
-			ts := formatTimestamp(reply.ComposeTime)
-			sender := reply.ImDisplayName
-			if sender == "" {
-				sender = "unknown"
-			}
-			reactions := formatReactions(*reply)
-			fmt.Printf("  > [%s] %s: %s%s\n", ts, sender, content, reactions)
-		}
-	}
-}
-
 func filterMessagesSince(messages []api.ChatMessage, since string) []api.ChatMessage {
 	// Parse the since date
 	sinceTime, err := time.Parse("2006-01-02", since)
@@ -1117,12 +817,6 @@ func filterMessagesSince(messages []api.ChatMessage, since string) []api.ChatMes
 		}
 	}
 	return filtered
-}
-
-func outputJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }
 
 // --- Files ---
@@ -1159,20 +853,17 @@ func filesCmd() *cobra.Command {
 
 			if allDrives {
 				// Show files from ALL drives
-				fmt.Fprintf(os.Stderr, "fetching all drives from %s...\n", teamName)
+				statusf("fetching all drives from %s...", teamName)
 				driveFiles, err := graphClient.GetTeamAllFiles(ctx, teamID)
 				if err != nil {
 					return fmt.Errorf("fetching drives: %w", err)
 				}
 
 				if jsonOutput {
-					return outputJSON(driveFiles)
+					return emitJSON(driveFiles)
 				}
 
-				for driveName, files := range driveFiles {
-					fmt.Printf("\n== %s ==\n", driveName)
-					printFileList(files)
-				}
+				fmt.Print(renderFilesByDrive(driveFiles))
 				return nil
 			}
 
@@ -1189,15 +880,15 @@ func filesCmd() *cobra.Command {
 				for _, d := range drives {
 					if strings.Contains(strings.ToLower(d.Name), strings.ToLower(drive)) {
 						driveID = d.ID
-						fmt.Fprintf(os.Stderr, "fetching files from %s / %s...\n", teamName, d.Name)
+						statusf("fetching files from %s / %s...", teamName, d.Name)
 						break
 					}
 				}
 
 				if driveID == "" {
-					fmt.Fprintf(os.Stderr, "drive %q not found. available drives:\n", drive)
+					statusf("drive %q not found. available drives:", drive)
 					for _, d := range drives {
-						fmt.Fprintf(os.Stderr, "  - %s\n", d.Name)
+						statusf("  - %s", d.Name)
 					}
 					return nil
 				}
@@ -1208,10 +899,10 @@ func filesCmd() *cobra.Command {
 					files, fetchErr = graphClient.GetDriveFiles(ctx, driveID)
 				}
 			} else if path != "" {
-				fmt.Fprintf(os.Stderr, "fetching files from %s/%s...\n", teamName, path)
+				statusf("fetching files from %s/%s...", teamName, path)
 				files, fetchErr = graphClient.GetTeamFilesByPath(ctx, teamID, path)
 			} else {
-				fmt.Fprintf(os.Stderr, "fetching files from %s...\n", teamName)
+				statusf("fetching files from %s...", teamName)
 				files, fetchErr = graphClient.GetTeamFiles(ctx, teamID)
 			}
 			if fetchErr != nil {
@@ -1219,15 +910,10 @@ func filesCmd() *cobra.Command {
 			}
 
 			if jsonOutput {
-				return outputJSON(files)
+				return emitJSON(files)
 			}
 
-			if len(files) == 0 {
-				fmt.Println("no files found")
-				return nil
-			}
-
-			printFileList(files)
+			fmt.Print(renderFilesTable(files))
 			return nil
 		},
 	}
@@ -1235,25 +921,6 @@ func filesCmd() *cobra.Command {
 	cmd.Flags().String("drive", "", "specific drive name (e.g. 'Class Materials')")
 	cmd.Flags().Bool("all-drives", false, "show files from all drives (Documents, Class Materials, etc)")
 	return cmd
-}
-
-func printFileList(files []api.DriveItem) {
-	for _, f := range files {
-		icon := "F"
-		sizeStr := fmt.Sprintf("%d KB", f.Size/1024)
-		if f.Folder != nil {
-			icon = "D"
-			sizeStr = fmt.Sprintf("%d items", f.Folder.ChildCount)
-		}
-
-		modified := formatTimestamp(f.LastModifiedDateTime)
-		modifiedBy := ""
-		if f.LastModifiedBy != nil && f.LastModifiedBy.User != nil {
-			modifiedBy = f.LastModifiedBy.User.DisplayName
-		}
-
-		fmt.Printf("%s %-45s  %10s  %s  %s\n", icon, f.Name, sizeStr, modified, modifiedBy)
-	}
 }
 
 // --- Calendar ---
@@ -1278,52 +945,10 @@ func calendarCmd() *cobra.Command {
 			}
 
 			if jsonOutput {
-				return outputJSON(events)
+				return emitJSON(events)
 			}
 
-			if len(events) == 0 {
-				fmt.Println("no upcoming events")
-				return nil
-			}
-
-			for _, e := range events {
-				if e.IsCancelled {
-					continue
-				}
-
-				start := ""
-				if e.Start != nil {
-					start = formatTimestamp(e.Start.DateTime)
-				}
-
-				end := ""
-				if e.End != nil {
-					end = formatTimestamp(e.End.DateTime)
-				}
-
-				location := ""
-				if e.Location != nil && e.Location.DisplayName != "" {
-					location = " @ " + e.Location.DisplayName
-				}
-
-				organizer := ""
-				if e.Organizer != nil && e.Organizer.EmailAddress != nil {
-					organizer = e.Organizer.EmailAddress.Name
-				}
-
-				fmt.Printf("[%s - %s] %s%s\n", start, end, e.Subject, location)
-				if organizer != "" {
-					fmt.Printf("  Organizer: %s\n", organizer)
-				}
-				if e.BodyPreview != "" {
-					preview := e.BodyPreview
-					if len(preview) > 100 {
-						preview = preview[:100] + "..."
-					}
-					fmt.Printf("  %s\n", preview)
-				}
-				fmt.Println()
-			}
+			fmt.Print(renderCalendar(events))
 			return nil
 		},
 	}
@@ -1364,73 +989,28 @@ func assignmentsCmd() *cobra.Command {
 				}
 
 				if jsonOutput {
-					return outputJSON(classes)
+					return emitJSON(classes)
 				}
 
+				rows := make([][]string, 0, len(classes))
 				for _, c := range classes {
-					fmt.Printf("%-60s %s\n", c.GetDisplayName(), c.ID)
+					rows = append(rows, []string{c.GetDisplayName(), c.ID})
 				}
+				fmt.Print(mdTable([]string{"Class", "ID"}, rows))
 				return nil
 			}
 
-			fmt.Fprintln(os.Stderr, "fetching assignments with submission status...")
+			statusf("fetching assignments with submission status...")
 			assignments, err := graphClient.GetAllAssignmentsWithStatus(ctx, )
 			if err != nil {
 				return fmt.Errorf("fetching assignments: %w", err)
 			}
 
 			if jsonOutput {
-				return outputJSON(assignments)
+				return emitJSON(assignments)
 			}
 
-			if len(assignments) == 0 {
-				fmt.Println("no assignments found")
-				return nil
-			}
-
-			for _, a := range assignments {
-				due := formatTimestamp(a.DueDateTime)
-				name := a.DisplayName
-				class := a.ClassName
-
-				statusIcon := "[ ]"
-				statusText := ""
-				switch a.SubmissionStatus {
-				case "submitted":
-					statusIcon = "[x]"
-					statusText = " (submitted)"
-				case "returned":
-					statusIcon = "[>]"
-					statusText = " (returned)"
-				case "working":
-					statusIcon = "[~]"
-					statusText = " (in progress)"
-				}
-
-				fmt.Printf("%s %-30s  due: %-20s  class: %s%s\n", statusIcon, name, due, class, statusText)
-
-				if a.Instructions != nil && a.Instructions.Content != "" {
-					content := stripHTML(a.Instructions.Content)
-					if len(content) > 100 {
-						content = content[:100] + "..."
-					}
-					fmt.Printf("  %s\n", content)
-				}
-
-				// Show submitted resources
-				for _, r := range a.SubmittedResources {
-					link := r.Resource.Link
-					if link == "" {
-						link = r.Resource.FileURL
-					}
-					if link != "" {
-						fmt.Printf("  -> %s: %s\n", r.Resource.DisplayName, link)
-					} else if r.Resource.DisplayName != "" {
-						fmt.Printf("  -> %s\n", r.Resource.DisplayName)
-					}
-				}
-			}
-
+			fmt.Print(renderAssignments(assignments))
 			return nil
 		},
 	}
@@ -1490,7 +1070,7 @@ func submitCmd() *cobra.Command {
 				return fmt.Errorf("no class found matching %q", args[0])
 			}
 
-			fmt.Fprintf(os.Stderr, "found class: %s\n", matchedClass.GetDisplayName())
+			statusf("found class: %s", matchedClass.GetDisplayName())
 
 			// Find assignment
 			assignments, err := graphClient.GetAssignments(ctx, matchedClass.ID)
@@ -1510,7 +1090,7 @@ func submitCmd() *cobra.Command {
 				return fmt.Errorf("no assignment found matching %q", args[1])
 			}
 
-			fmt.Fprintf(os.Stderr, "found assignment: %s\n", matchedAssignment.DisplayName)
+			statusf("found assignment: %s", matchedAssignment.DisplayName)
 
 			// Get submission
 			submission, err := graphClient.GetSubmission(ctx, matchedClass.ID, matchedAssignment.ID)
@@ -1518,13 +1098,13 @@ func submitCmd() *cobra.Command {
 				return fmt.Errorf("getting submission: %w", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "submission ID: %s (status: %s)\n", submission.ID, submission.Status)
+			statusf("submission ID: %s (status: %s)", submission.ID, submission.Status)
 
 			// Setup resources folder
-			fmt.Fprintln(os.Stderr, "setting up resources folder...")
+			statusf("setting up resources folder...")
 			if err := graphClient.SetupSubmissionResourcesFolder(ctx, matchedClass.ID, matchedAssignment.ID, submission.ID); err != nil {
 				// Non-fatal - folder might already exist
-				fmt.Fprintf(os.Stderr, "warning: setup resources folder: %v\n", err)
+				statusf("warning: setup resources folder: %v", err)
 			}
 
 			// Read file
@@ -1539,19 +1119,22 @@ func submitCmd() *cobra.Command {
 			}
 
 			// Upload resource
-			fmt.Fprintf(os.Stderr, "uploading %s (%d KB)...\n", fileName, len(fileData)/1024)
+			statusf("uploading %s (%d KB)...", fileName, len(fileData)/1024)
 			_, err = graphClient.UploadSubmissionResource(ctx, matchedClass.ID, matchedAssignment.ID, submission.ID, fileName, fileData)
 			if err != nil {
 				return fmt.Errorf("uploading resource: %w", err)
 			}
 
 			// Submit
-			fmt.Fprintln(os.Stderr, "submitting assignment...")
+			statusf("submitting assignment...")
 			if err := graphClient.SubmitAssignment(ctx, matchedClass.ID, matchedAssignment.ID, submission.ID); err != nil {
 				return fmt.Errorf("submitting: %w", err)
 			}
 
-			fmt.Fprintln(os.Stderr, "assignment submitted successfully")
+			statusf("assignment submitted successfully")
+			if jsonOutput {
+				return emitOK(submission.ID)
+			}
 			return nil
 		},
 	}
@@ -1603,15 +1186,18 @@ func uploadCmd() *cobra.Command {
 
 			graphClient := api.NewGraphClient(tokens.Graph)
 
-			fmt.Fprintf(os.Stderr, "uploading to %s/%s (%d KB)...\n", teamName, remotePath, len(fileData)/1024)
+			statusf("uploading to %s/%s (%d KB)...", teamName, remotePath, len(fileData)/1024)
 			item, err := graphClient.UploadTeamFile(ctx, teamID, remotePath, fileData)
 			if err != nil {
 				return fmt.Errorf("uploading: %w", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "uploaded: %s (%d KB)\n", item.Name, item.Size/1024)
+			statusf("uploaded: %s (%d KB)", item.Name, item.Size/1024)
 			if item.WebURL != "" {
-				fmt.Fprintf(os.Stderr, "url: %s\n", item.WebURL)
+				statusf("url: %s", item.WebURL)
+			}
+			if jsonOutput {
+				return emitJSON(map[string]any{"ok": true, "id": item.ID, "name": item.Name, "webUrl": item.WebURL})
 			}
 			return nil
 		},
@@ -1639,7 +1225,10 @@ func markReadCmd() *cobra.Command {
 				return fmt.Errorf("marking as read: %w", err)
 			}
 
-			fmt.Fprintln(os.Stderr, "conversation marked as read")
+			statusf("conversation marked as read")
+			if jsonOutput {
+				return emitOK(args[0])
+			}
 			return nil
 		},
 	}
@@ -1658,12 +1247,6 @@ func whoamiCmd() *cobra.Command {
 				return fmt.Errorf("loading tokens: %w", err)
 			}
 
-			type tokenStatus struct {
-				Name   string `json:"name"`
-				Valid  bool   `json:"valid"`
-				Expiry string `json:"expiry"`
-			}
-
 			tokenList := []struct {
 				name  string
 				token string
@@ -1675,28 +1258,25 @@ func whoamiCmd() *cobra.Command {
 				{"assignments", tokens.Assignments},
 			}
 
-			var statuses []tokenStatus
+			statuses := make([]tokenStatusEntry, 0, len(tokenList))
 			for _, t := range tokenList {
 				if t.token == "" {
-					statuses = append(statuses, tokenStatus{t.name, false, "not set"})
+					statuses = append(statuses, tokenStatusEntry{Name: t.name, Valid: false, Expiry: "not set"})
 					continue
 				}
 
 				exp, err := auth.GetTokenExpiry(t.token)
 				if err != nil {
-					statuses = append(statuses, tokenStatus{t.name, false, "invalid"})
+					statuses = append(statuses, tokenStatusEntry{Name: t.name, Valid: false, Expiry: "invalid"})
 					continue
 				}
 
 				valid := time.Now().Before(exp)
-				statuses = append(statuses, tokenStatus{t.name, valid, exp.Local().Format("2006-01-02 15:04:05")})
-			}
-
-			if jsonOutput {
-				return outputJSON(statuses)
+				statuses = append(statuses, tokenStatusEntry{Name: t.name, Valid: valid, Expiry: exp.Local().Format("2006-01-02 15:04:05")})
 			}
 
 			// Try to get user info from Graph API
+			info := whoamiInfo{Tokens: statuses}
 			if tokens.Graph != "" {
 				req, err := http.NewRequest("GET", "https://graph.microsoft.com/v1.0/me", nil)
 				if err == nil {
@@ -1712,28 +1292,25 @@ func whoamiCmd() *cobra.Command {
 							UPN         string `json:"userPrincipalName"`
 						}
 						if json.Unmarshal(body, &me) == nil && me.DisplayName != "" {
-							fmt.Printf("user: %s\n", me.DisplayName)
-							email := me.Mail
-							if email == "" {
-								email = me.UPN
+							info.DisplayName = me.DisplayName
+							info.Email = me.Mail
+							if info.Email == "" {
+								info.Email = me.UPN
 							}
-							if email != "" {
-								fmt.Printf("email: %s\n", email)
-							}
-							fmt.Println()
 						}
 					}
 				}
 			}
 
-			fmt.Println("tokens:")
-			for _, s := range statuses {
-				icon := "[x]"
-				if !s.Valid {
-					icon = "[ ]"
-				}
-				fmt.Printf("  %s %-15s  expires: %s\n", icon, s.Name, s.Expiry)
+			if jsonOutput {
+				return emitJSON(map[string]any{
+					"user":   info.DisplayName,
+					"email":  info.Email,
+					"tokens": statuses,
+				})
 			}
+
+			fmt.Print(renderWhoami(info))
 			return nil
 		},
 	}
@@ -1767,40 +1344,16 @@ func unreadCmd() *cobra.Command {
 			}
 
 			if jsonOutput {
-				return outputJSON(unreadChats)
+				return emitJSON(unreadChats)
 			}
 
 			if len(unreadChats) == 0 {
-				fmt.Println("no unread messages")
+				fmt.Print("_no unread messages_\n")
 				return nil
 			}
 
-			fmt.Printf("%d unread conversations:\n\n", len(unreadChats))
-
-			for _, chat := range unreadChats {
-				title := chat.Title
-				if title == "" {
-					title = formatMemberNames(chat.Members)
-				}
-
-				lastMsg := ""
-				sender := ""
-				if chat.LastMessage != nil {
-					lastMsg = stripHTML(chat.LastMessage.Content)
-					if len(lastMsg) > 80 {
-						lastMsg = lastMsg[:80] + "..."
-					}
-					sender = chat.LastMessage.ImDisplayName
-				}
-
-				fmt.Printf("* %-40s %s\n", title, chat.ID)
-				if sender != "" && lastMsg != "" {
-					fmt.Printf("  %s: %s\n", sender, lastMsg)
-				} else if lastMsg != "" {
-					fmt.Printf("  %s\n", lastMsg)
-				}
-			}
-
+			fmt.Printf("## Unread (%d)\n\n", len(unreadChats))
+			fmt.Print(renderChatsTable(unreadChats))
 			return nil
 		},
 	}
@@ -1830,7 +1383,7 @@ func deadlinesCmd() *cobra.Command {
 
 			graphClient := api.NewGraphClientWithAssignments(tokens.Graph, tokens.Assignments)
 
-			fmt.Fprintln(os.Stderr, "fetching assignments...")
+			statusf("fetching assignments...")
 			assignments, err := graphClient.GetAllAssignmentsWithStatus(ctx, )
 			if err != nil {
 				return fmt.Errorf("fetching assignments: %w", err)
@@ -1850,47 +1403,10 @@ func deadlinesCmd() *cobra.Command {
 			})
 
 			if jsonOutput {
-				return outputJSON(pending)
+				return emitJSON(pending)
 			}
 
-			if len(pending) == 0 {
-				fmt.Println("no pending deadlines")
-				return nil
-			}
-
-			now := time.Now()
-			for _, a := range pending {
-				due := formatTimestamp(a.DueDateTime)
-
-				// Calculate days until due
-				daysLeft := ""
-				for _, f := range timeFormats {
-					if t, err := time.Parse(f, a.DueDateTime); err == nil {
-						d := int(t.Sub(now).Hours() / 24)
-						if d < 0 {
-							daysLeft = fmt.Sprintf(" (OVERDUE %d days)", -d)
-						} else if d == 0 {
-							daysLeft = " (TODAY)"
-						} else if d == 1 {
-							daysLeft = " (TOMORROW)"
-						} else {
-							daysLeft = fmt.Sprintf(" (%d days)", d)
-						}
-						break
-					}
-				}
-
-				statusIcon := "[ ]"
-				switch a.SubmissionStatus {
-				case "working":
-					statusIcon = "[~]"
-				case "returned":
-					statusIcon = "[>]"
-				}
-
-				fmt.Printf("%s %s  %-35s  %s%s\n", statusIcon, due, a.DisplayName, a.ClassName, daysLeft)
-			}
-
+			fmt.Print(renderDeadlines(pending))
 			return nil
 		},
 	}
