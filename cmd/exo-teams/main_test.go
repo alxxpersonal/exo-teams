@@ -178,9 +178,9 @@ func TestFilterMessagesSince(t *testing.T) {
 	}
 }
 
-// --- FormatReactions ---
+// --- RenderReactions ---
 
-func TestFormatReactions(t *testing.T) {
+func TestRenderReactions(t *testing.T) {
 	tests := []struct {
 		name string
 		msg  api.ChatMessage
@@ -200,9 +200,9 @@ func TestFormatReactions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatReactions(tt.msg)
+			got := renderReactions(tt.msg)
 			if tt.want == "" && got != "" {
-				t.Errorf("formatReactions() = %q, want empty", got)
+				t.Errorf("renderReactions() = %q, want empty", got)
 			}
 		})
 	}
