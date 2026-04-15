@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
@@ -11,22 +10,7 @@ import (
 	"github.com/alxxpersonal/exo-teams/internal/api"
 )
 
-// --- Output Mode ---
-
-type outputMode int
-
-const (
-	outputMarkdown outputMode = iota
-	outputJSONMode
-)
-
-// currentMode returns the active output mode based on the global --json flag.
-func currentMode() outputMode {
-	if jsonOutput {
-		return outputJSONMode
-	}
-	return outputMarkdown
-}
+// --- Output Helpers ---
 
 // emitJSON writes v as indented JSON to stdout.
 func emitJSON(v any) error {
@@ -50,11 +34,6 @@ func statusf(format string, args ...any) {
 		format += "\n"
 	}
 	fmt.Fprintf(os.Stderr, format, args...)
-}
-
-// writeLine writes one render line plus newline to w.
-func writeLine(w io.Writer, s string) {
-	fmt.Fprintln(w, s)
 }
 
 // --- Markdown Helpers ---
