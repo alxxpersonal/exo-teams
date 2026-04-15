@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -36,6 +39,9 @@ var (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// stop is invoked explicitly after ExecuteContext so os.Exit does not skip it
+
 	rootCmd := &cobra.Command{
 		Use:   "exo-teams",
 		Short: "CLI for Microsoft Teams internal API",
@@ -67,7 +73,9 @@ func main() {
 		deadlinesCmd(),
 	)
 
-	if err := rootCmd.Execute(); err != nil {
+	err := rootCmd.ExecuteContext(ctx)
+	stop()
+	if err != nil {
 		os.Exit(1)
 	}
 }
@@ -90,8 +98,8 @@ func loadGraphToken() (*auth.Tokens, error) {
 
 // findTeamBySearch searches the user's teams for one matching the given search string.
 // Returns the team's group ID, display name, and any error.
-func findTeamBySearch(client *api.Client, search string) (groupID, teamName string, err error) {
-	teams, err := client.GetTeams()
+func findTeamBySearch(ctx context.Context, client *api.Client, search string) (groupID, teamName string, err error) {
+	teams, err := client.GetTeams(ctx)
 	if err != nil {
 		return "", "", err
 	}
@@ -113,6 +121,7 @@ func authCmd() *cobra.Command {
 		Short: "Authenticate with Microsoft Teams",
 		Long:  "Login via browser OAuth, import from fossteams, or refresh existing tokens.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			_ = cmd.Context()
 			importFlag, _ := cmd.Flags().GetBool("import")
 			refreshFlag, _ := cmd.Flags().GetBool("refresh")
 
@@ -155,12 +164,13 @@ func listTeamsCmd() *cobra.Command {
 		Use:   "list-teams",
 		Short: "List all teams and their channels",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			client, err := api.NewClientWithoutExchange()
 			if err != nil {
 				return err
 			}
 
-			teams, err := client.GetTeams()
+			teams, err := client.GetTeams(ctx)
 			if err != nil {
 				return fmt.Errorf("fetching teams: %w", err)
 			}
@@ -200,18 +210,19 @@ func listChatsCmd() *cobra.Command {
 		Use:   "list-chats",
 		Short: "List all DMs and group chats",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			client, err := api.NewClientWithoutExchange()
 			if err != nil {
 				return err
 			}
 
-			chats, err := client.GetChats()
+			chats, err := client.GetChats(ctx)
 			if err != nil {
 				return fmt.Errorf("fetching chats: %w", err)
 			}
 
 			// Resolve DM names
-			client.ResolveChatNames(chats)
+			client.ResolveChatNames(ctx, chats)
 
 			if jsonOutput {
 				return outputJSON(chats)
@@ -270,6 +281,7 @@ func getMessagesCmd() *cobra.Command {
 		Long:  "Search across all teams for a channel matching the given term and display its messages.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			search := strings.ToLower(args[0])
 			count, _ := cmd.Flags().GetInt("count")
 			allPages, _ := cmd.Flags().GetBool("all")
@@ -280,7 +292,7 @@ func getMessagesCmd() *cobra.Command {
 				return err
 			}
 
-			teams, err := client.GetTeams()
+			teams, err := client.GetTeams(ctx)
 			if err != nil {
 				return fmt.Errorf("fetching teams: %w", err)
 			}
@@ -310,9 +322,9 @@ func getMessagesCmd() *cobra.Command {
 
 			var messages []api.ChatMessage
 			if allPages {
-				messages, err = client.GetAllMessages(matchedChannel.ID, 200, 0)
+				messages, err = client.GetAllMessages(ctx, matchedChannel.ID, 200, 0)
 			} else {
-				messages, err = client.GetAllMessages(matchedChannel.ID, count, 1)
+				messages, err = client.GetAllMessages(ctx, matchedChannel.ID, count, 1)
 			}
 			if err != nil {
 				return fmt.Errorf("fetching messages: %w", err)
@@ -352,6 +364,7 @@ func getChatCmd() *cobra.Command {
 		Long:  "Search chats by title, member name, ID, or last message content.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			search := strings.ToLower(args[0])
 			count, _ := cmd.Flags().GetInt("count")
 			allPages, _ := cmd.Flags().GetBool("all")
@@ -362,13 +375,13 @@ func getChatCmd() *cobra.Command {
 				return err
 			}
 
-			chats, err := client.GetChats()
+			chats, err := client.GetChats(ctx)
 			if err != nil {
 				return fmt.Errorf("fetching chats: %w", err)
 			}
 
 			// Resolve names for searching
-			client.ResolveChatNames(chats)
+			client.ResolveChatNames(ctx, chats)
 
 			// Find matching chat
 			var matchedChat *api.Chat
@@ -417,9 +430,9 @@ func getChatCmd() *cobra.Command {
 
 			var messages []api.ChatMessage
 			if allPages {
-				messages, err = client.GetAllMessages(matchedChat.ID, 200, 0)
+				messages, err = client.GetAllMessages(ctx, matchedChat.ID, 200, 0)
 			} else {
-				messages, err = client.GetAllMessages(matchedChat.ID, count, 1)
+				messages, err = client.GetAllMessages(ctx, matchedChat.ID, count, 1)
 			}
 			if err != nil {
 				return fmt.Errorf("fetching messages: %w", err)
@@ -458,11 +471,12 @@ func sendCmd() *cobra.Command {
 		Short: "Send a message to a channel or chat",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			client, err := api.NewClient()
 			if err != nil {
 				return err
 			}
-			if err := client.SendMessage(args[0], args[1]); err != nil {
+			if err := client.SendMessage(ctx, args[0], args[1]); err != nil {
 				return err
 			}
 			fmt.Fprintln(os.Stderr, "message sent")
@@ -482,6 +496,7 @@ func sendFileCmd() *cobra.Command {
 		Long:  "Send files with optional message. Use --file multiple times for multiple files.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			message, _ := cmd.Flags().GetString("message")
 
 			if len(files) == 0 {
@@ -506,7 +521,7 @@ func sendFileCmd() *cobra.Command {
 					msg = message
 				}
 
-				if err := client.SendMessageWithFile(args[0], msg, filePath, fileData); err != nil {
+				if err := client.SendMessageWithFile(ctx, args[0], msg, filePath, fileData); err != nil {
 					return fmt.Errorf("sending file %s: %w", filePath, err)
 				}
 
@@ -530,6 +545,7 @@ func newDMCmd() *cobra.Command {
 		Long:  "Find a user by name in your Teams directory and start a new DM conversation.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			search := strings.ToLower(args[0])
 			message := args[1]
 
@@ -593,7 +609,7 @@ func newDMCmd() *cobra.Command {
 
 			mri := "8:orgid:" + matchedUser.ID
 			fmt.Fprintln(os.Stderr, "creating conversation...")
-			convID, err := client.StartNewDM(mri)
+			convID, err := client.StartNewDM(ctx, mri)
 			if err != nil {
 				return fmt.Errorf("creating DM: %w", err)
 			}
@@ -601,7 +617,7 @@ func newDMCmd() *cobra.Command {
 			fmt.Fprintf(os.Stderr, "conversation created: %s\n", convID)
 
 			// Send message
-			if err := client.SendMessage(convID, message); err != nil {
+			if err := client.SendMessage(ctx, convID, message); err != nil {
 				return fmt.Errorf("sending message: %w", err)
 			}
 
@@ -620,6 +636,7 @@ func downloadCmd() *cobra.Command {
 		Long:  "Download a file by specifying the team and file path within the team drive.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			filePath, _ := cmd.Flags().GetString("path")
 			outputDir, _ := cmd.Flags().GetString("output")
 			driveName, _ := cmd.Flags().GetString("drive")
@@ -639,7 +656,7 @@ func downloadCmd() *cobra.Command {
 				return err
 			}
 
-			teamID, teamName, err := findTeamBySearch(client, args[0])
+			teamID, teamName, err := findTeamBySearch(ctx, client, args[0])
 			if err != nil {
 				return err
 			}
@@ -650,7 +667,7 @@ func downloadCmd() *cobra.Command {
 
 			if driveName != "" {
 				// Find specific drive and download from it
-				drives, driveErr := graphClient.GetTeamDrives(teamID)
+				drives, driveErr := graphClient.GetTeamDrives(ctx, teamID)
 				if driveErr != nil {
 					return fmt.Errorf("fetching drives: %w", driveErr)
 				}
@@ -672,13 +689,13 @@ func downloadCmd() *cobra.Command {
 				}
 
 				fmt.Fprintf(os.Stderr, "fetching file info from %s/%s...\n", teamName, filePath)
-				item, err = graphClient.GetDriveFileByPath(driveID, filePath)
+				item, err = graphClient.GetDriveFileByPath(ctx, driveID, filePath)
 				if err != nil {
 					return fmt.Errorf("getting file: %w", err)
 				}
 			} else {
 				fmt.Fprintf(os.Stderr, "fetching file info from %s/%s...\n", teamName, filePath)
-				item, err = graphClient.GetTeamFileByPath(teamID, filePath)
+				item, err = graphClient.GetTeamFileByPath(ctx, teamID, filePath)
 				if err != nil {
 					return fmt.Errorf("getting file: %w", err)
 				}
@@ -689,7 +706,7 @@ func downloadCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(os.Stderr, "downloading %s (%d KB)...\n", item.Name, item.Size/1024)
-			data, err := graphClient.DownloadFile(item.DownloadURL)
+			data, err := graphClient.DownloadFile(ctx, item.DownloadURL)
 			if err != nil {
 				return fmt.Errorf("downloading: %w", err)
 			}
@@ -729,6 +746,7 @@ func activityCmd() *cobra.Command {
 		Use:   "activity",
 		Short: "Show recent activity feed (mentions, replies, reactions)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			client, err := api.NewClient()
 			if err != nil {
 				return err
@@ -736,7 +754,7 @@ func activityCmd() *cobra.Command {
 
 			fmt.Fprintln(os.Stderr, "fetching activity feed...")
 
-			items, err := client.GetActivity(30)
+			items, err := client.GetActivity(ctx, 30)
 			if err != nil {
 				return fmt.Errorf("fetching activity: %w", err)
 			}
@@ -793,6 +811,7 @@ func searchCmd() *cobra.Command {
 		Short: "Search across Teams messages",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			query := args[0]
 
 			tokens, err := loadGraphToken()
@@ -803,7 +822,7 @@ func searchCmd() *cobra.Command {
 			fmt.Fprintf(os.Stderr, "searching for %q...\n", query)
 
 			graphClient := api.NewGraphClient(tokens.Graph)
-			hits, err := graphClient.SearchMessages(query)
+			hits, err := graphClient.SearchMessages(ctx, query)
 			if err != nil {
 				return fmt.Errorf("searching: %w", err)
 			}
@@ -1114,6 +1133,7 @@ func filesCmd() *cobra.Command {
 		Short: "List files from a team's SharePoint",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			path, _ := cmd.Flags().GetString("path")
 
 			tokens, err := loadGraphToken()
@@ -1127,7 +1147,7 @@ func filesCmd() *cobra.Command {
 				return err
 			}
 
-			teamID, teamName, err := findTeamBySearch(client, args[0])
+			teamID, teamName, err := findTeamBySearch(ctx, client, args[0])
 			if err != nil {
 				return err
 			}
@@ -1140,7 +1160,7 @@ func filesCmd() *cobra.Command {
 			if allDrives {
 				// Show files from ALL drives
 				fmt.Fprintf(os.Stderr, "fetching all drives from %s...\n", teamName)
-				driveFiles, err := graphClient.GetTeamAllFiles(teamID)
+				driveFiles, err := graphClient.GetTeamAllFiles(ctx, teamID)
 				if err != nil {
 					return fmt.Errorf("fetching drives: %w", err)
 				}
@@ -1160,7 +1180,7 @@ func filesCmd() *cobra.Command {
 			var fetchErr error
 			if drive != "" {
 				// Find specific drive by name
-				drives, err := graphClient.GetTeamDrives(teamID)
+				drives, err := graphClient.GetTeamDrives(ctx, teamID)
 				if err != nil {
 					return fmt.Errorf("fetching drives: %w", err)
 				}
@@ -1183,16 +1203,16 @@ func filesCmd() *cobra.Command {
 				}
 
 				if path != "" {
-					files, fetchErr = graphClient.GetDriveFilesByPath(driveID, path)
+					files, fetchErr = graphClient.GetDriveFilesByPath(ctx, driveID, path)
 				} else {
-					files, fetchErr = graphClient.GetDriveFiles(driveID)
+					files, fetchErr = graphClient.GetDriveFiles(ctx, driveID)
 				}
 			} else if path != "" {
 				fmt.Fprintf(os.Stderr, "fetching files from %s/%s...\n", teamName, path)
-				files, fetchErr = graphClient.GetTeamFilesByPath(teamID, path)
+				files, fetchErr = graphClient.GetTeamFilesByPath(ctx, teamID, path)
 			} else {
 				fmt.Fprintf(os.Stderr, "fetching files from %s...\n", teamName)
-				files, fetchErr = graphClient.GetTeamFiles(teamID)
+				files, fetchErr = graphClient.GetTeamFiles(ctx, teamID)
 			}
 			if fetchErr != nil {
 				return fmt.Errorf("fetching files: %w", fetchErr)
@@ -1243,6 +1263,7 @@ func calendarCmd() *cobra.Command {
 		Use:   "calendar",
 		Short: "Show upcoming calendar events",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			tokens, err := loadGraphToken()
 			if err != nil {
 				return err
@@ -1251,7 +1272,7 @@ func calendarCmd() *cobra.Command {
 			days, _ := cmd.Flags().GetInt("days")
 
 			graphClient := api.NewGraphClient(tokens.Graph)
-			events, err := graphClient.GetCalendarEvents(days)
+			events, err := graphClient.GetCalendarEvents(ctx, days)
 			if err != nil {
 				return fmt.Errorf("fetching calendar: %w", err)
 			}
@@ -1317,6 +1338,7 @@ func assignmentsCmd() *cobra.Command {
 		Use:   "assignments",
 		Short: "View assignments from all classes",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			tokens, err := auth.Load()
 			if err != nil {
 				return err
@@ -1336,7 +1358,7 @@ func assignmentsCmd() *cobra.Command {
 
 			listClasses, _ := cmd.Flags().GetBool("classes")
 			if listClasses {
-				classes, err := graphClient.GetClasses()
+				classes, err := graphClient.GetClasses(ctx, )
 				if err != nil {
 					return fmt.Errorf("fetching classes: %w", err)
 				}
@@ -1352,7 +1374,7 @@ func assignmentsCmd() *cobra.Command {
 			}
 
 			fmt.Fprintln(os.Stderr, "fetching assignments with submission status...")
-			assignments, err := graphClient.GetAllAssignmentsWithStatus()
+			assignments, err := graphClient.GetAllAssignmentsWithStatus(ctx, )
 			if err != nil {
 				return fmt.Errorf("fetching assignments: %w", err)
 			}
@@ -1425,6 +1447,7 @@ func submitCmd() *cobra.Command {
 		Long:  "Find a class and assignment by search term, then upload and submit a file.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			classSearch := strings.ToLower(args[0])
 			assignmentSearch := strings.ToLower(args[1])
 			filePath, _ := cmd.Flags().GetString("file")
@@ -1450,7 +1473,7 @@ func submitCmd() *cobra.Command {
 			graphClient := api.NewGraphClientWithAssignments(tokens.Graph, tokens.Assignments)
 
 			// Find class
-			classes, err := graphClient.GetClasses()
+			classes, err := graphClient.GetClasses(ctx, )
 			if err != nil {
 				return fmt.Errorf("fetching classes: %w", err)
 			}
@@ -1470,7 +1493,7 @@ func submitCmd() *cobra.Command {
 			fmt.Fprintf(os.Stderr, "found class: %s\n", matchedClass.GetDisplayName())
 
 			// Find assignment
-			assignments, err := graphClient.GetAssignments(matchedClass.ID)
+			assignments, err := graphClient.GetAssignments(ctx, matchedClass.ID)
 			if err != nil {
 				return fmt.Errorf("fetching assignments: %w", err)
 			}
@@ -1490,7 +1513,7 @@ func submitCmd() *cobra.Command {
 			fmt.Fprintf(os.Stderr, "found assignment: %s\n", matchedAssignment.DisplayName)
 
 			// Get submission
-			submission, err := graphClient.GetSubmission(matchedClass.ID, matchedAssignment.ID)
+			submission, err := graphClient.GetSubmission(ctx, matchedClass.ID, matchedAssignment.ID)
 			if err != nil {
 				return fmt.Errorf("getting submission: %w", err)
 			}
@@ -1499,7 +1522,7 @@ func submitCmd() *cobra.Command {
 
 			// Setup resources folder
 			fmt.Fprintln(os.Stderr, "setting up resources folder...")
-			if err := graphClient.SetupSubmissionResourcesFolder(matchedClass.ID, matchedAssignment.ID, submission.ID); err != nil {
+			if err := graphClient.SetupSubmissionResourcesFolder(ctx, matchedClass.ID, matchedAssignment.ID, submission.ID); err != nil {
 				// Non-fatal - folder might already exist
 				fmt.Fprintf(os.Stderr, "warning: setup resources folder: %v\n", err)
 			}
@@ -1517,14 +1540,14 @@ func submitCmd() *cobra.Command {
 
 			// Upload resource
 			fmt.Fprintf(os.Stderr, "uploading %s (%d KB)...\n", fileName, len(fileData)/1024)
-			_, err = graphClient.UploadSubmissionResource(matchedClass.ID, matchedAssignment.ID, submission.ID, fileName, fileData)
+			_, err = graphClient.UploadSubmissionResource(ctx, matchedClass.ID, matchedAssignment.ID, submission.ID, fileName, fileData)
 			if err != nil {
 				return fmt.Errorf("uploading resource: %w", err)
 			}
 
 			// Submit
 			fmt.Fprintln(os.Stderr, "submitting assignment...")
-			if err := graphClient.SubmitAssignment(matchedClass.ID, matchedAssignment.ID, submission.ID); err != nil {
+			if err := graphClient.SubmitAssignment(ctx, matchedClass.ID, matchedAssignment.ID, submission.ID); err != nil {
 				return fmt.Errorf("submitting: %w", err)
 			}
 
@@ -1545,6 +1568,7 @@ func uploadCmd() *cobra.Command {
 		Long:  "Upload a local file to a team's drive at the specified remote path.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			remotePath, _ := cmd.Flags().GetString("path")
 			localFile, _ := cmd.Flags().GetString("file")
 
@@ -1566,7 +1590,7 @@ func uploadCmd() *cobra.Command {
 				return err
 			}
 
-			teamID, teamName, err := findTeamBySearch(client, args[0])
+			teamID, teamName, err := findTeamBySearch(ctx, client, args[0])
 			if err != nil {
 				return err
 			}
@@ -1580,7 +1604,7 @@ func uploadCmd() *cobra.Command {
 			graphClient := api.NewGraphClient(tokens.Graph)
 
 			fmt.Fprintf(os.Stderr, "uploading to %s/%s (%d KB)...\n", teamName, remotePath, len(fileData)/1024)
-			item, err := graphClient.UploadTeamFile(teamID, remotePath, fileData)
+			item, err := graphClient.UploadTeamFile(ctx, teamID, remotePath, fileData)
 			if err != nil {
 				return fmt.Errorf("uploading: %w", err)
 			}
@@ -1605,12 +1629,13 @@ func markReadCmd() *cobra.Command {
 		Short: "Mark a conversation as read",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			client, err := api.NewClient()
 			if err != nil {
 				return err
 			}
 
-			if err := client.MarkConversationRead(args[0]); err != nil {
+			if err := client.MarkConversationRead(ctx, args[0]); err != nil {
 				return fmt.Errorf("marking as read: %w", err)
 			}
 
@@ -1627,6 +1652,7 @@ func whoamiCmd() *cobra.Command {
 		Use:   "whoami",
 		Short: "Show account info and token status",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			_ = cmd.Context()
 			tokens, err := auth.Load()
 			if err != nil {
 				return fmt.Errorf("loading tokens: %w", err)
@@ -1720,17 +1746,18 @@ func unreadCmd() *cobra.Command {
 		Use:   "unread",
 		Short: "Show unread messages across all chats",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			client, err := api.NewClient()
 			if err != nil {
 				return err
 			}
 
-			chats, err := client.GetChats()
+			chats, err := client.GetChats(ctx)
 			if err != nil {
 				return fmt.Errorf("fetching chats: %w", err)
 			}
 
-			client.ResolveChatNames(chats)
+			client.ResolveChatNames(ctx, chats)
 
 			var unreadChats []api.Chat
 			for _, chat := range chats {
@@ -1786,6 +1813,7 @@ func deadlinesCmd() *cobra.Command {
 		Use:   "deadlines",
 		Short: "Show all upcoming assignment deadlines sorted by date",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			tokens, err := auth.Load()
 			if err != nil {
 				return err
@@ -1803,7 +1831,7 @@ func deadlinesCmd() *cobra.Command {
 			graphClient := api.NewGraphClientWithAssignments(tokens.Graph, tokens.Assignments)
 
 			fmt.Fprintln(os.Stderr, "fetching assignments...")
-			assignments, err := graphClient.GetAllAssignmentsWithStatus()
+			assignments, err := graphClient.GetAllAssignmentsWithStatus(ctx, )
 			if err != nil {
 				return fmt.Errorf("fetching assignments: %w", err)
 			}
