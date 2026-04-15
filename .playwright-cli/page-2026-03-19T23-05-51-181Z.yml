@@ -1,0 +1,16 @@
+- generic [active] [ref=e11]:
+  - button "Open Next.js Dev Tools" [ref=e6] [cursor=pointer]:
+    - img [ref=e7]
+  - alert [ref=e10]
+  - generic [ref=e13]:
+    - generic [ref=e14]:
+      - heading "MonoDispatch AI" [level=1] [ref=e15]
+      - paragraph [ref=e16]: Sign in to your account
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - generic [ref=e19]: Email
+        - textbox "you@monodispatch.ai" [ref=e20]
+      - generic [ref=e21]:
+        - generic [ref=e22]: Password
+        - textbox "Enter your password" [ref=e23]
+      - button "Sign in" [ref=e24]

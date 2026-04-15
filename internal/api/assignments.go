@@ -2,10 +2,13 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -337,15 +340,163 @@ func (g *GraphClient) SetupSubmissionResourcesFolder(classID, assignmentID, subm
 }
 
 // UploadSubmissionResource uploads a file as a submission resource.
-// The file is added to the submission's resources folder.
+//
+// Microsoft's educationFileResource needs the file to already live in
+// SharePoint before it can be registered against the submission. The flow is:
+//
+//  1. GET the submission to find its `resourceFolderUrl` (SharePoint sharing URL).
+//  2. Resolve that URL to a drive item via `/shares/{encoded}/driveItem`.
+//  3. PUT the file bytes to the drive item's folder.
+//  4. POST the educationFileResource metadata pointing at the uploaded webUrl.
+//
+// Caller must invoke SetupSubmissionResourcesFolder first so the sharepoint
+// folder exists.
 func (g *GraphClient) UploadSubmissionResource(classID, assignmentID, submissionID, fileName string, fileData []byte) (*SubmissionResource, error) {
-	// Add the file as a resource to the submission
+	folderURL, err := g.getSubmissionResourceFolderURL(classID, assignmentID, submissionID)
+	if err != nil {
+		return nil, fmt.Errorf("resolving resource folder: %w", err)
+	}
+
+	folderItem, err := g.getDriveItemFromSharingURL(folderURL)
+	if err != nil {
+		return nil, fmt.Errorf("resolving sharepoint folder: %w", err)
+	}
+	if folderItem.ParentReference == nil || folderItem.ParentReference.DriveID == "" {
+		return nil, fmt.Errorf("folder driveItem missing parent reference")
+	}
+
+	uploaded, err := g.uploadToDriveFolder(folderItem.ParentReference.DriveID, folderItem.ID, fileName, fileData)
+	if err != nil {
+		return nil, fmt.Errorf("uploading file to sharepoint: %w", err)
+	}
+
+	return g.registerEducationFileResource(classID, assignmentID, submissionID, fileName, uploaded.WebURL)
+}
+
+// getSubmissionResourceFolderURL returns the SharePoint sharing URL where a
+// submission's resources live. SetUpResourcesFolder must have been called.
+func (g *GraphClient) getSubmissionResourceFolderURL(classID, assignmentID, submissionID string) (string, error) {
+	endpoint := assignmentsBaseURL + "/classes/" + classID + "/assignments/" + assignmentID + "/submissions/" + submissionID
+	body, err := g.assignmentsRequest(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("fetching submission: %w", err)
+	}
+
+	var sub struct {
+		ResourcesFolderURL string `json:"resourcesFolderUrl"`
+		ResourceFolderURL  string `json:"resourceFolderUrl"`
+	}
+	if err := json.Unmarshal(body, &sub); err != nil {
+		return "", fmt.Errorf("parsing submission: %w", err)
+	}
+	url := sub.ResourcesFolderURL
+	if url == "" {
+		url = sub.ResourceFolderURL
+	}
+	if url == "" {
+		return "", fmt.Errorf("submission has no resources folder url (run SetUpResourcesFolder first)")
+	}
+	return url, nil
+}
+
+// getDriveItemFromSharingURL resolves a folder reference returned by the
+// assignments API to its driveItem. Two shapes are observed in the wild:
+//
+//  1. A direct Graph reference: `https://graph.microsoft.com/v1.0/drives/{driveID}/items/{itemID}`
+//     which is fetched directly and does not need the /shares lookup.
+//  2. A SharePoint sharing URL (`https://{tenant}.sharepoint.com/...`) which
+//     must be base64url-encoded and fetched via `/shares/{u!id}/driveItem`.
+func (g *GraphClient) getDriveItemFromSharingURL(sharingURL string) (*DriveItem, error) {
+	var endpoint string
+	if strings.HasPrefix(sharingURL, "https://graph.microsoft.com/") {
+		endpoint = sharingURL
+	} else {
+		shareID := encodeSharingURL(sharingURL)
+		endpoint = graphBaseURL + "/shares/" + shareID + "/driveItem"
+	}
+
+	body, err := g.graphRequest(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("resolving share %q: %w", sharingURL, err)
+	}
+
+	var item DriveItem
+	if err := json.Unmarshal(body, &item); err != nil {
+		return nil, fmt.Errorf("parsing share driveItem: %w", err)
+	}
+
+	// Direct Graph references do not always populate ParentReference with the
+	// drive ID, so reconstruct it from the endpoint URL when we know it.
+	if item.ParentReference == nil || item.ParentReference.DriveID == "" {
+		if driveID := extractDriveIDFromGraphURL(sharingURL); driveID != "" {
+			if item.ParentReference == nil {
+				item.ParentReference = &ParentReference{}
+			}
+			item.ParentReference.DriveID = driveID
+		}
+	}
+	return &item, nil
+}
+
+// extractDriveIDFromGraphURL pulls the driveID out of a graph.microsoft.com
+// drives/{driveID}/items/{itemID} URL. Returns empty string if not matched.
+func extractDriveIDFromGraphURL(u string) string {
+	const marker = "/drives/"
+	i := strings.Index(u, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := u[i+len(marker):]
+	end := strings.Index(rest, "/")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
+// uploadToDriveFolder uploads bytes to a specific folder in a specific drive
+// using the simple PUT content endpoint. Suitable for files up to a few MB.
+func (g *GraphClient) uploadToDriveFolder(driveID, folderID, fileName string, data []byte) (*DriveItem, error) {
+	endpoint := graphBaseURL + "/drives/" + driveID + "/items/" + folderID + ":/" + url.PathEscape(fileName) + ":/content"
+
+	req, err := http.NewRequest("PUT", endpoint, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("creating upload request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := g.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("uploading file: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading upload response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("upload returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var item DriveItem
+	if err := json.Unmarshal(body, &item); err != nil {
+		return nil, fmt.Errorf("parsing uploaded item: %w", err)
+	}
+	return &item, nil
+}
+
+// registerEducationFileResource attaches an already-uploaded sharepoint file
+// to a submission by POSTing its webUrl as an educationFileResource.
+func (g *GraphClient) registerEducationFileResource(classID, assignmentID, submissionID, fileName, fileURL string) (*SubmissionResource, error) {
 	endpoint := assignmentsBaseURL + "/classes/" + classID + "/assignments/" + assignmentID + "/submissions/" + submissionID + "/resources"
 
 	resourceBody := map[string]any{
 		"resource": map[string]any{
-			"@odata.type":  "#microsoft.graph.educationFileResource",
-			"displayName":  fileName,
+			"@odata.type": "#microsoft.graph.educationFileResource",
+			"displayName": fileName,
+			"fileUrl":     fileURL,
 		},
 	}
 
@@ -376,7 +527,6 @@ func (g *GraphClient) UploadSubmissionResource(classID, assignmentID, submission
 	if err != nil {
 		return nil, fmt.Errorf("reading resource response: %w", err)
 	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("add resource returned %d: %s", resp.StatusCode, string(body))
 	}
@@ -385,8 +535,17 @@ func (g *GraphClient) UploadSubmissionResource(classID, assignmentID, submission
 	if err := json.Unmarshal(body, &resource); err != nil {
 		return nil, fmt.Errorf("parsing resource response: %w", err)
 	}
-
 	return &resource, nil
+}
+
+// encodeSharingURL encodes a SharePoint sharing URL for use with the Graph
+// `/shares/{id}/driveItem` endpoint. The format is `u!<base64url no padding>`.
+func encodeSharingURL(sharingURL string) string {
+	raw := base64.StdEncoding.EncodeToString([]byte(sharingURL))
+	raw = strings.TrimRight(raw, "=")
+	raw = strings.ReplaceAll(raw, "+", "-")
+	raw = strings.ReplaceAll(raw, "/", "_")
+	return "u!" + raw
 }
 
 // SubmitAssignment submits a student's assignment submission.
