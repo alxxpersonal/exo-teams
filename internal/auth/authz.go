@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-const (
-	authzEndpoint = "https://teams.microsoft.com/api/authsvc/v1.0/authz"
-)
+// authzEndpoint is the Teams authz URL. Declared as a var so tests can
+// override it to point at a fake server. Default is the real endpoint.
+var authzEndpoint = "https://teams.microsoft.com/api/authsvc/v1.0/authz"
 
 // AuthzResponse is the response from the authz endpoint.
 type AuthzResponse struct {
