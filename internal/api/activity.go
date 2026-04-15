@@ -1,20 +1,21 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 )
 
 // ActivityMessage represents a notification from the 48:notifications thread.
 type ActivityMessage struct {
-	ID          string `json:"id"`
-	Type        string `json:"type"`
-	MessageType string `json:"messagetype"`
-	ComposeTime string `json:"composetime"`
-	Content     string `json:"content"`
-	From        string `json:"from"`
-	ImDisplayName string `json:"imdisplayname"`
-	Properties  *ActivityProperties `json:"properties,omitempty"`
+	ID            string              `json:"id"`
+	Type          string              `json:"type"`
+	MessageType   string              `json:"messagetype"`
+	ComposeTime   string              `json:"composetime"`
+	Content       string              `json:"content"`
+	From          string              `json:"from"`
+	ImDisplayName string              `json:"imdisplayname"`
+	Properties    *ActivityProperties `json:"properties,omitempty"`
 }
 
 // ActivityProperties contains the activity metadata.
@@ -24,11 +25,11 @@ type ActivityProperties struct {
 
 // ActivityDetail holds the actual activity info.
 type ActivityDetail struct {
-	ActivityType           string `json:"activityType"`
-	ActivitySubtype        string `json:"activitySubtype"`
+	ActivityType            string `json:"activityType"`
+	ActivitySubtype         string `json:"activitySubtype"`
 	ActivityTimestamp       string `json:"activityTimestamp"`
-	SourceThreadID         string `json:"sourceThreadId"`
-	SourceMessageID        any    `json:"sourceMessageId"`
+	SourceThreadID          string `json:"sourceThreadId"`
+	SourceMessageID         any    `json:"sourceMessageId"`
 	SourceUserImDisplayName string `json:"sourceUserImDisplayName"`
 }
 
@@ -38,7 +39,7 @@ type ActivityResponse struct {
 }
 
 // GetActivity fetches the activity feed from the 48:notifications conversation thread.
-func (c *Client) GetActivity(count int) ([]ActivityMessage, error) {
+func (c *Client) GetActivity(ctx context.Context, count int) ([]ActivityMessage, error) {
 	if err := c.EnsureSkypeToken(); err != nil {
 		return nil, err
 	}
@@ -50,7 +51,7 @@ func (c *Client) GetActivity(count int) ([]ActivityMessage, error) {
 	endpoint := fmt.Sprintf("%s/users/ME/conversations/48:notifications/messages?pageSize=%d&startTime=1",
 		msgBaseURL, count)
 
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating activity request: %w", err)
 	}
@@ -59,7 +60,7 @@ func (c *Client) GetActivity(count int) ([]ActivityMessage, error) {
 	req.Header.Set("Accept", "application/json")
 
 	var resp ActivityResponse
-	if err := c.doRequestJSON(req, &resp); err != nil {
+	if err := c.doRequestJSON(ctx, req, &resp); err != nil {
 		return nil, fmt.Errorf("fetching activity: %w", err)
 	}
 
