@@ -26,3 +26,10 @@ Thumbs.db
 
 # Build
 dist/
+
+# Playwright artifacts (screenshots, console logs, page snapshots)
+.playwright-cli/
+.playwright/
+playwright-report/
+test-results/
+*.playwright-trace.zip
